@@ -8,7 +8,7 @@ android {
 
     defaultConfig {
         applicationId = "ai.forgenerative.wgswitch"
-        minSdk = 29
+        minSdk = 30
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"

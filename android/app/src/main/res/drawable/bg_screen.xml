@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape>
+            <gradient android:angle="270" android:startColor="@color/bg_top" android:endColor="@color/bg_bottom" />
+        </shape>
+    </item>
+    <!-- soft purple glow behind the hero card -->
+    <item>
+        <shape>
+            <gradient android:type="radial" android:gradientRadius="420dp"
+                android:centerX="0.85" android:centerY="0.05"
+                android:startColor="#33A35BFF" android:endColor="#00A35BFF" />
+        </shape>
+    </item>
+</layer-list>

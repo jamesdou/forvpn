@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg_top">#121A33</color>
+    <color name="bg_bottom">#07090F</color>
+    <color name="card">#161D31</color>
+    <color name="card_stroke">#232B45</color>
+    <color name="accent_start">#5B7CFF</color>
+    <color name="accent_end">#A35BFF</color>
+    <color name="danger_start">#E5484D</color>
+    <color name="danger_end">#B4235F</color>
+    <color name="text">#EEF1F8</color>
+    <color name="text_muted">#8A93A8</color>
+    <color name="online">#34D399</color>
+    <color name="idle">#FBBF24</color>
+    <color name="offline">#5B6478</color>
+</resources>

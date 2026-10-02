@@ -5,8 +5,8 @@
 
     <application
         android:label="WG Switch"
-        android:icon="@android:drawable/ic_lock_lock"
-        android:theme="@android:style/Theme.DeviceDefault.DayNight"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@style/AppTheme"
         android:networkSecurityConfig="@xml/network_security_config">
         <activity
             android:name=".MainActivity"
