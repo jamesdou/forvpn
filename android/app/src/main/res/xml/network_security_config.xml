@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Plain HTTP is allowed only to the server's tunnel address; WireGuard already encrypts it. -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">10.100.0.1</domain>
+    </domain-config>
+</network-security-config>

@@ -1,0 +1,14 @@
+[Unit]
+Description=WireGuard peer on/off API
+After=wg-quick@wg0.service
+Requires=wg-quick@wg0.service
+# Restart along with wg0 so disabled peers are stripped again after wg-quick re-adds them.
+PartOf=wg-quick@wg0.service
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/wgctl/wgctl.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=wg-quick@wg0.service
