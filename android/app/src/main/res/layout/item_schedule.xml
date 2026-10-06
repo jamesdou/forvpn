@@ -10,6 +10,7 @@
     android:paddingEnd="6dp">
 
     <ImageView
+        android:id="@+id/icon"
         android:layout_width="22dp"
         android:layout_height="22dp"
         android:importantForAccessibility="no"

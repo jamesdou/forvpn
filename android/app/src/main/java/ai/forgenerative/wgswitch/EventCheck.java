@@ -103,6 +103,9 @@ public class EventCheck extends JobService {
             case "connected" -> peer + " connected";
             case "disconnected" -> peer + " disconnected";
             case "rdp_mode" -> peer + ": " + e.optString("detail");
+            case "ssh_key_added" -> peer + ": SSH key added";
+            case "ssh_key_removed" -> peer + ": SSH key removed";
+            case "ssh" -> peer + ": " + e.optString("detail");
             case "reconnected" -> peer + " reconnected";
             case "new_ip" -> peer + " connected from a new address";
             case "enabled" -> peer + " turned on" + by;

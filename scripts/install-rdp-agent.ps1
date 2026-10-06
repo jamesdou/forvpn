@@ -11,6 +11,13 @@ $ErrorActionPreference = "Stop"
 $task = "WG Switch RDP agent"
 $dir = "$env:ProgramData\WGSwitch"
 
+# Re-installing: stop every running copy so only the new version runs (stopping the task
+# alone can leave its PowerShell process behind).
+if (Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue) { Stop-ScheduledTask -TaskName $task }
+Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
+    Where-Object CommandLine -like "*WGSwitch\rdp-agent.ps1*" |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
 # The helper runs as SYSTEM, so only SYSTEM and Administrators may change its file.
 New-Item -ItemType Directory -Force $dir | Out-Null
 Copy-Item "$PSScriptRoot\rdp-agent.ps1" "$dir\rdp-agent.ps1" -Force

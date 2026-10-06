@@ -143,6 +143,15 @@ public class DeviceActivity extends Activity {
                 content.addView(section("Remote Desktop access"));
                 content.addView(rdpModeRow(agent));
                 content.addView(note(rdpStatus(agent)));
+
+                content.addView(section("SSH server"));
+                content.addView(sshRow(agent));
+                content.addView(section("SSH keys"));
+                JSONArray keys = agent.optJSONArray("keys");
+                for (int i = 0; keys != null && i < keys.length(); i++) content.addView(keyRow(keys.optJSONObject(i)));
+                if (keys == null || keys.length() == 0) content.addView(note("No keys yet. Nothing can use the tunnel until you add one."));
+                if (agent.optBoolean("keys_pending")) content.addView(note("Applying key changes… the PC picks them up within about 10 seconds."));
+                content.addView(outlineButton("+  Add key", v -> addKey()));
             }
 
             content.addView(section("Daily schedules"));
@@ -285,6 +294,89 @@ public class DeviceActivity extends Activity {
         return status;
     }
 
+    private View sshRow(JSONObject agent) {
+        boolean on = agent.optBoolean("ssh_enabled", true);
+        boolean tunnel = "tunnel".equals(agent.optString("rdp_mode"));
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout row = new LinearLayout(this);
+        String[][] options = {{"on", "On"}, {"off", "Off"}};
+        for (int i = 0; i < options.length; i++) {
+            boolean value = options[i][0].equals("on");
+            TextView chip = chip(options[i][1]);
+            chip.setSelected(value == on);
+            chip.setOnClickListener(v -> {
+                if (value == on) return;
+                if (!value && tunnel) {
+                    Toast.makeText(this, "Switch Remote Desktop to Direct first; tunnel only needs SSH", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                JSONObject body = new JSONObject();
+                try {
+                    body.put("enabled", value);
+                } catch (Exception ignored) {
+                }
+                post("/peers/" + peer + "/ssh", body, value ? "Turning SSH on…" : "Turning SSH off…");
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(42), 1f);
+            if (i > 0) lp.leftMargin = dp(8);
+            row.addView(chip, lp);
+        }
+        box.addView(row);
+        String state = agent.optBoolean("sshd") ? "Running" : "Stopped";
+        box.addView(note(state + (tunnel ? " · needed for tunnel only, so it stays on" : on ? "" : " · nobody can use the tunnel while it's off")));
+        return box;
+    }
+
+    private View keyRow(JSONObject k) {
+        View row = LayoutInflater.from(this).inflate(R.layout.item_schedule, content, false);
+        ((android.widget.ImageView) row.findViewById(R.id.icon)).setImageResource(R.drawable.ic_key);
+        String name = k.optString("name");
+        ((TextView) row.findViewById(R.id.title)).setText(name);
+        String fp = k.optString("fingerprint");
+        ((TextView) row.findViewById(R.id.days)).setText(k.optString("type") + "  ·  "
+                + (fp.length() > 22 ? fp.substring(0, 22) + "…" : fp) + (k.optBoolean("applied") ? "" : "  ·  applying"));
+        row.findViewById(R.id.delete).setContentDescription("Remove key " + name);
+        row.findViewById(R.id.delete).setOnClickListener(v -> new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Remove key " + name + "?")
+                .setMessage("That device will no longer be able to open the SSH tunnel to " + peer + ".")
+                .setPositiveButton("Remove", (dlg, w) -> call("DELETE", "/peers/" + peer + "/keys/" + name, null, "Key removed"))
+                .setNegativeButton("Cancel", null)
+                .show());
+        return row;
+    }
+
+    private void addKey() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(24), dp(8), dp(24), 0);
+        android.widget.EditText name = new android.widget.EditText(this);
+        name.setHint("Device name, e.g. laptop");
+        name.setSingleLine(true);
+        android.widget.EditText key = new android.widget.EditText(this);
+        key.setHint("ssh-ed25519 AAAA…");
+        key.setMinLines(3);
+        key.setTypeface(android.graphics.Typeface.MONOSPACE);
+        key.setTextSize(13);
+        box.addView(name);
+        box.addView(key);
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Add SSH key")
+                .setMessage("Paste the device's PUBLIC key (the .pub file). Never the private key.")
+                .setView(box)
+                .setPositiveButton("Add", (dlg, w) -> {
+                    JSONObject body = new JSONObject();
+                    try {
+                        body.put("name", name.getText().toString().trim());
+                        body.put("key", key.getText().toString().trim());
+                    } catch (Exception ignored) {
+                    }
+                    post("/peers/" + peer + "/keys", body, "Key added");
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
     private void setRdpMode(String mode) {
         JSONObject body = new JSONObject();
         try {
@@ -347,7 +439,7 @@ public class DeviceActivity extends Activity {
         String kind = e.optString("kind");
         int color = getColor(switch (kind) {
             case "connected", "reconnected" -> R.color.online;
-            case "new_ip" -> R.color.danger_start;
+            case "new_ip", "ssh_key_added" -> R.color.danger_start;
             case "enabled", "rdp_mode" -> R.color.accent_start;
             default -> R.color.offline;
         });

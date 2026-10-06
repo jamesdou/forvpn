@@ -581,7 +581,9 @@ class Handler(BaseHTTPRequestHandler):
         if not name:
             return self._send(403, {"error": "unknown device"})
         reported = b.get("keys")
-        reported = [k for k in reported if isinstance(k, str)] if isinstance(reported, list) else None
+        # All-or-nothing: a garbled report must never read as "this PC has no keys".
+        if not (isinstance(reported, list) and all(isinstance(k, str) for k in reported)):
+            reported = None
         with lock:
             prev = db.execute("SELECT applied FROM agent_status WHERE peer = ?", (name,)).fetchone()
             db.execute("INSERT OR REPLACE INTO agent_status (peer, applied, sshd, error, ts, keys) VALUES (?, ?, ?, ?, ?, ?)",
