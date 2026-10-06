@@ -37,6 +37,17 @@
         </LinearLayout>
 
         <ImageButton
+            android:id="@+id/history"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginEnd="10dp"
+            android:background="@drawable/bg_icon_button"
+            android:contentDescription="Activity history"
+            android:padding="12dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_history" />
+
+        <ImageButton
             android:id="@+id/token"
             android:layout_width="48dp"
             android:layout_height="48dp"
@@ -120,27 +131,34 @@
         android:textSize="12sp"
         android:textStyle="bold" />
 
-    <ScrollView
+    <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+        android:id="@+id/swipe"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1"
-        android:clipToPadding="false"
-        android:overScrollMode="never"
-        android:scrollbars="none">
+        android:layout_weight="1">
 
-        <LinearLayout
-            android:id="@+id/list"
+        <ScrollView
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical" />
-    </ScrollView>
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:fillViewport="true"
+            android:overScrollMode="never"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/list"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+        </ScrollView>
+    </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
         android:gravity="center"
-        android:text="Turning a device off only removes its key on the server."
+        android:text="Tap a device for timers, schedules and history."
         android:textColor="@color/text_muted"
         android:textSize="12sp" />
 

@@ -1,0 +1,360 @@
+package ai.forgenerative.wgswitch;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.TimePickerDialog;
+import android.os.Bundle;
+import android.text.format.DateUtils;
+import android.view.Gravity;
+import android.view.LayoutInflater;
+import android.view.View;
+import android.view.WindowInsets;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.util.Locale;
+import java.util.TimeZone;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+/**
+ * One device: timers, daily schedules and its activity history.
+ * Started without a "peer" extra it shows the history of all devices.
+ */
+public class DeviceActivity extends Activity {
+    static final String EXTRA_PEER = "peer";
+    private static final int[] TIMER_MINUTES = {30, 60, 120, 240};
+
+    private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private String peer;  // null = all devices
+    private LinearLayout content;
+    private TextView title, subtitle;
+    private ProgressBar progress;
+    private SwipeRefreshLayout swipe;
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        getWindow().setDecorFitsSystemWindows(false);
+        setContentView(R.layout.activity_device);
+        View root = findViewById(R.id.root);
+        int side = root.getPaddingStart();
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+            v.setPadding(side + bars.left, bars.top, side + bars.right, bars.bottom);
+            return insets;
+        });
+
+        peer = getIntent().getStringExtra(EXTRA_PEER);
+        content = findViewById(R.id.content);
+        title = findViewById(R.id.title);
+        subtitle = findViewById(R.id.subtitle);
+        progress = findViewById(R.id.progress);
+        findViewById(R.id.back).setOnClickListener(v -> finish());
+        swipe = findViewById(R.id.swipe);
+        swipe.setColorSchemeColors(getColor(R.color.accent_start), getColor(R.color.accent_end));
+        swipe.setProgressBackgroundColorSchemeColor(getColor(R.color.card));
+        swipe.setOnRefreshListener(this::load);
+        title.setText(peer != null ? peer : "Activity");
+        subtitle.setText(peer != null ? "" : "All devices · last 90 days");
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        load();
+    }
+
+    @Override
+    protected void onDestroy() {
+        io.shutdownNow();
+        super.onDestroy();
+    }
+
+    private void load() {
+        progress.setVisibility(View.VISIBLE);
+        io.execute(() -> {
+            try {
+                JSONObject device = null;
+                JSONArray schedules = new JSONArray();
+                if (peer != null) {
+                    JSONArray peers = new JSONArray(Api.call(this, "GET", "/peers"));
+                    for (int i = 0; i < peers.length(); i++) {
+                        if (peer.equals(peers.getJSONObject(i).optString("name"))) device = peers.getJSONObject(i);
+                    }
+                    JSONArray all = new JSONArray(Api.call(this, "GET", "/schedules"));
+                    for (int i = 0; i < all.length(); i++) {
+                        if (peer.equals(all.getJSONObject(i).optString("peer"))) schedules.put(all.getJSONObject(i));
+                    }
+                }
+                String q = "/events?limit=100" + (peer != null ? "&peer=" + peer : "");
+                JSONArray events = new JSONObject(Api.call(this, "GET", q)).optJSONArray("events");
+                JSONObject d = device;
+                JSONArray s = schedules;
+                runOnUiThread(() -> {
+                    progress.setVisibility(View.GONE);
+                    swipe.setRefreshing(false);
+                    render(d, s, events);
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    progress.setVisibility(View.GONE);
+                    swipe.setRefreshing(false);
+                    content.removeAllViews();
+                    content.addView(note(e.getMessage() != null && e.getMessage().startsWith("Server said:")
+                            ? e.getMessage() : "Can't reach the server. Is the WireGuard tunnel on?"));
+                });
+            }
+        });
+    }
+
+    private void render(JSONObject device, JSONArray schedules, JSONArray events) {
+        content.removeAllViews();
+        if (device != null) {
+            boolean self = device.optBoolean("self");
+            boolean enabled = device.optBoolean("enabled");
+            String pub = Api.publicIpText(device.optJSONObject("public_ip"), "  ·  ");
+            String domain = device.isNull("domain") ? "" : device.optString("domain");
+            subtitle.setText((domain.isEmpty() ? "" : domain + "\n")
+                    + device.optString("ip").replace("/32", "") + "  ·  " + (enabled ? "On" : "Off")
+                    + (pub != null ? "\nPublic: " + pub : ""));
+
+            JSONObject timer = device.optJSONObject("timer");
+            if (timer != null) content.addView(timerBanner(timer, enabled));
+
+            if (self) {
+                content.addView(note("This is the phone you're using, so it can't be turned off from here."));
+            } else {
+                content.addView(section("Turn on for"));
+                content.addView(chipRow(true));
+                content.addView(section("Turn off for"));
+                content.addView(chipRow(false));
+            }
+
+            content.addView(section("Daily schedules"));
+            for (int i = 0; i < schedules.length(); i++) content.addView(scheduleRow(schedules.optJSONObject(i)));
+            if (schedules.length() == 0) content.addView(note("No schedules yet."));
+            content.addView(outlineButton("+  Add schedule", v -> addSchedule(self)));
+        }
+
+        content.addView(section(device != null ? "Activity" : "Recent events"));
+        for (int i = 0; i < events.length(); i++) content.addView(eventRow(events.optJSONObject(i)));
+        if (events.length() == 0) {
+            content.addView(note("No activity recorded yet. Connections, disconnections and changes show up here."));
+        }
+    }
+
+    // ------------------------------------------------------------ pieces
+
+    private TextView section(String text) {
+        TextView t = new TextView(this);
+        t.setText(text.toUpperCase(Locale.ROOT));
+        t.setTextColor(getColor(R.color.text_muted));
+        t.setTextSize(12);
+        t.setLetterSpacing(0.15f);
+        t.setTypeface(t.getTypeface(), android.graphics.Typeface.BOLD);
+        t.setPadding(dp(4), dp(24), 0, dp(10));
+        return t;
+    }
+
+    private TextView note(String text) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextColor(getColor(R.color.text_muted));
+        t.setTextSize(14);
+        t.setPadding(dp(4), dp(4), dp(4), dp(8));
+        return t;
+    }
+
+    private View timerBanner(JSONObject timer, boolean enabled) {
+        LinearLayout b = new LinearLayout(this);
+        b.setBackgroundResource(R.drawable.bg_banner);
+        b.setGravity(Gravity.CENTER_VERTICAL);
+        b.setPadding(dp(16), dp(12), dp(8), dp(12));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.topMargin = dp(16);
+        b.setLayoutParams(lp);
+
+        android.widget.ImageView icon = new android.widget.ImageView(this);
+        icon.setImageResource(R.drawable.ic_timer);
+        icon.setImageTintList(android.content.res.ColorStateList.valueOf(getColor(R.color.accent_start)));
+        b.addView(icon, new LinearLayout.LayoutParams(dp(22), dp(22)));
+
+        TextView t = new TextView(this);
+        t.setText(Api.timerText(timer));
+        t.setTextColor(getColor(R.color.text));
+        t.setTextSize(15);
+        t.setPadding(dp(12), 0, 0, 0);
+        b.addView(t, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        TextView cancel = new TextView(this);
+        cancel.setText("Cancel");
+        cancel.setTextColor(getColor(R.color.accent_start));
+        cancel.setTypeface(cancel.getTypeface(), android.graphics.Typeface.BOLD);
+        cancel.setPadding(dp(12), dp(8), dp(12), dp(8));
+        cancel.setBackgroundResource(R.drawable.bg_glass_circle);
+        // Re-sending the current state without minutes clears the timer on the server.
+        cancel.setOnClickListener(v -> post("/peers/" + peer + (enabled ? "/enable" : "/disable"), null, "Timer cancelled"));
+        b.addView(cancel);
+        return b;
+    }
+
+    private View chipRow(boolean enable) {
+        LinearLayout row = new LinearLayout(this);
+        for (int i = 0; i < TIMER_MINUTES.length; i++) {
+            int minutes = TIMER_MINUTES[i];
+            TextView chip = chip(minutes < 60 ? minutes + " min" : minutes / 60 + " h");
+            chip.setOnClickListener(v -> {
+                JSONObject body = new JSONObject();
+                try {
+                    body.put("minutes", minutes);
+                } catch (Exception ignored) {
+                }
+                String label = (enable ? "On" : "Off") + " for " + Api.duration(minutes * 60L);
+                post("/peers/" + peer + (enable ? "/enable" : "/disable"), body, label);
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(42), 1f);
+            if (i > 0) lp.leftMargin = dp(8);
+            row.addView(chip, lp);
+        }
+        return row;
+    }
+
+    private TextView chip(String text) {
+        TextView c = new TextView(this);
+        c.setText(text);
+        c.setGravity(Gravity.CENTER);
+        c.setTextColor(getColor(R.color.text));
+        c.setTextSize(14);
+        c.setBackgroundResource(R.drawable.bg_chip);
+        return c;
+    }
+
+    private View outlineButton(String text, View.OnClickListener click) {
+        TextView b = new TextView(this);
+        b.setText(text);
+        b.setGravity(Gravity.CENTER);
+        b.setTextColor(getColor(R.color.accent_start));
+        b.setTextSize(15);
+        b.setTypeface(b.getTypeface(), android.graphics.Typeface.BOLD);
+        b.setBackgroundResource(R.drawable.bg_button_outline);
+        b.setOnClickListener(click);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(48));
+        lp.topMargin = dp(4);
+        b.setLayoutParams(lp);
+        return b;
+    }
+
+    private View scheduleRow(JSONObject s) {
+        View row = LayoutInflater.from(this).inflate(R.layout.item_schedule, content, false);
+        boolean on = "enable".equals(s.optString("action"));
+        ((TextView) row.findViewById(R.id.title)).setText((on ? "On at " : "Off at ") + s.optString("time"));
+        ((TextView) row.findViewById(R.id.days)).setText(daysText(s.optString("days")));
+        row.findViewById(R.id.delete).setOnClickListener(v -> new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Delete schedule?")
+                .setPositiveButton("Delete", (d, w) -> call("DELETE", "/schedules/" + s.optLong("id"), null, "Schedule deleted"))
+                .setNegativeButton("Cancel", null)
+                .show());
+        return row;
+    }
+
+    private static String daysText(String days) {
+        if (days.equals("0123456")) return "Every day";
+        if (days.equals("01234")) return "Weekdays";
+        if (days.equals("56")) return "Weekends";
+        String[] names = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
+        StringBuilder b = new StringBuilder();
+        for (char c : days.toCharArray()) b.append(b.length() > 0 ? ", " : "").append(names[c - '0']);
+        return b.toString();
+    }
+
+    private View eventRow(JSONObject e) {
+        View row = LayoutInflater.from(this).inflate(R.layout.item_event, content, false);
+        String kind = e.optString("kind");
+        int color = getColor(switch (kind) {
+            case "connected", "reconnected" -> R.color.online;
+            case "new_ip" -> R.color.danger_start;
+            case "enabled" -> R.color.accent_start;
+            default -> R.color.offline;
+        });
+        row.findViewById(R.id.dot).setBackgroundTintList(android.content.res.ColorStateList.valueOf(color));
+        ((TextView) row.findViewById(R.id.title)).setText(EventCheck.title(e));
+        TextView detail = row.findViewById(R.id.detail);
+        String d = e.optString("detail");
+        if ("app".equals(e.optString("source"))) d = d.isEmpty() ? "from the app" : d;
+        detail.setText(d);
+        detail.setVisibility(d.isEmpty() ? View.GONE : View.VISIBLE);
+        long ms = (long) (e.optDouble("ts") * 1000);
+        ((TextView) row.findViewById(R.id.time)).setText(
+                DateUtils.getRelativeTimeSpanString(ms, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS,
+                        DateUtils.FORMAT_ABBREV_RELATIVE));
+        return row;
+    }
+
+    // ------------------------------------------------------------ actions
+
+    private void addSchedule(boolean self) {
+        // Step 1: on or off (off is impossible for this phone).
+        String[] actions = self ? new String[]{"Turn on"} : new String[]{"Turn off", "Turn on"};
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Schedule for " + peer)
+                .setItems(actions, (d, which) -> {
+                    boolean on = actions[which].equals("Turn on");
+                    // Step 2: time.
+                    new TimePickerDialog(this, android.R.style.Theme_DeviceDefault_Dialog_Alert, (tp, h, m) -> {
+                        // Step 3: days.
+                        String[] labels = {"Every day", "Weekdays", "Weekends"};
+                        String[] codes = {"0123456", "01234", "56"};
+                        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                                .setTitle(actions[which] + " at " + String.format(Locale.ROOT, "%02d:%02d", h, m))
+                                .setItems(labels, (d2, day) -> {
+                                    JSONObject body = new JSONObject();
+                                    try {
+                                        body.put("peer", peer);
+                                        body.put("action", on ? "enable" : "disable");
+                                        body.put("time", String.format(Locale.ROOT, "%02d:%02d", h, m));
+                                        body.put("days", codes[day]);
+                                        body.put("tz", TimeZone.getDefault().getID());
+                                    } catch (Exception ignored) {
+                                    }
+                                    post("/schedules", body, "Schedule added");
+                                })
+                                .show();
+                    }, 1, 0, android.text.format.DateFormat.is24HourFormat(this)).show();
+                })
+                .show();
+    }
+
+    private void post(String path, JSONObject body, String done) {
+        call("POST", path, body, done);
+    }
+
+    private void call(String method, String path, JSONObject body, String done) {
+        progress.setVisibility(View.VISIBLE);
+        io.execute(() -> {
+            String msg;
+            try {
+                Api.call(this, method, path, body);
+                msg = done;
+            } catch (Exception e) {
+                msg = e.getMessage() != null ? e.getMessage() : "Request failed";
+            }
+            String m = msg;
+            runOnUiThread(() -> {
+                Toast.makeText(this, m, Toast.LENGTH_SHORT).show();
+                load();
+            });
+        });
+    }
+
+    private int dp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
+    }
+}

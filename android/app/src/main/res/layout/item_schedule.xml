@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginBottom="10dp"
+    android:background="@drawable/bg_card"
+    android:gravity="center_vertical"
+    android:paddingVertical="10dp"
+    android:paddingStart="16dp"
+    android:paddingEnd="6dp">
+
+    <ImageView
+        android:layout_width="22dp"
+        android:layout_height="22dp"
+        android:importantForAccessibility="no"
+        android:src="@drawable/ic_schedule"
+        android:tint="@color/accent_start" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="14dp"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@color/text"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/days"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textColor="@color/text_muted"
+            android:textSize="13sp" />
+    </LinearLayout>
+
+    <ImageButton
+        android:id="@+id/delete"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:background="@drawable/bg_glass_circle"
+        android:contentDescription="Delete schedule"
+        android:padding="12dp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_close" />
+</LinearLayout>

@@ -19,3 +19,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 }
+
+dependencies {
+    // pull-down-to-refresh
+    implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.2.0")
+}

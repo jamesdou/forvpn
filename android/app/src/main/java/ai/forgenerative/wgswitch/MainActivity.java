@@ -4,7 +4,8 @@ import android.animation.ObjectAnimator;
 import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.SharedPreferences;
+import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.os.Bundle;
 import android.text.InputType;
@@ -22,29 +23,22 @@ import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /** Lists the WireGuard peers on the server, with an on/off switch for each one. */
 public class MainActivity extends Activity {
-    // Only reachable through the tunnel, so the phone's WireGuard must be on.
-    private static final String API = "http://10.100.0.1:8080";
-
     private final ExecutorService io = Executors.newSingleThreadExecutor();
-    private SharedPreferences prefs;
     private LinearLayout list, hero;
     private TextView heroTitle, heroSub;
     private ImageView heroIcon, refreshIcon;
     private ProgressBar progress;
+    private SwipeRefreshLayout swipe;
     private ObjectAnimator spin;
     private boolean animateNext = true;
 
@@ -53,7 +47,6 @@ public class MainActivity extends Activity {
         super.onCreate(state);
         getWindow().setDecorFitsSystemWindows(false);
         setContentView(R.layout.activity_main);
-        prefs = getSharedPreferences("wgswitch", MODE_PRIVATE);
 
         View root = findViewById(R.id.root);
         int side = root.getPaddingStart();
@@ -71,7 +64,23 @@ public class MainActivity extends Activity {
         progress = findViewById(R.id.progress);
         refreshIcon = findViewById(R.id.refreshIcon);
         findViewById(R.id.refresh).setOnClickListener(v -> refresh());
+        swipe = findViewById(R.id.swipe);
+        swipe.setColorSchemeColors(getColor(R.color.accent_start), getColor(R.color.accent_end));
+        swipe.setProgressBackgroundColorSchemeColor(getColor(R.color.card));
+        swipe.setOnRefreshListener(this::refresh);
         findViewById(R.id.token).setOnClickListener(v -> askToken());
+        findViewById(R.id.history).setOnClickListener(v -> startActivity(new Intent(this, DeviceActivity.class)));
+
+        EventCheck.createChannels(this);
+        try {
+            EventCheck.schedule(this);
+        } catch (RuntimeException e) {
+            // Background alerts are a bonus; never let them stop the app from opening.
+            Toast.makeText(this, "Background alerts unavailable: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+        if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 1);
+        }
 
         spin = ObjectAnimator.ofFloat(refreshIcon, View.ROTATION, 0f, 360f);
         spin.setDuration(800);
@@ -93,7 +102,7 @@ public class MainActivity extends Activity {
     }
 
     private String token() {
-        return prefs.getString("token", "");
+        return Api.token(this);
     }
 
     private void askToken() {
@@ -109,7 +118,7 @@ public class MainActivity extends Activity {
                 .setMessage("Printed by install.sh on the server (/etc/wgctl/token).")
                 .setView(box)
                 .setPositiveButton("Save", (d, w) -> {
-                    prefs.edit().putString("token", input.getText().toString().trim()).apply();
+                    Api.prefs(this).edit().putString("token", input.getText().toString().trim()).apply();
                     refresh();
                 })
                 .setNegativeButton("Cancel", null)
@@ -121,6 +130,7 @@ public class MainActivity extends Activity {
         if (loading) {
             spin.start();
         } else {
+            swipe.setRefreshing(false);
             spin.cancel();
             refreshIcon.animate().rotation(0f).setDuration(200).start();
         }
@@ -130,7 +140,7 @@ public class MainActivity extends Activity {
         setLoading(true);
         io.execute(() -> {
             try {
-                JSONArray peers = new JSONArray(call("GET", "/peers"));
+                JSONArray peers = new JSONArray(Api.call(this, "GET", "/peers"));
                 runOnUiThread(() -> {
                     setLoading(false);
                     show(peers);
@@ -140,6 +150,13 @@ public class MainActivity extends Activity {
                     setLoading(false);
                     showError(e);
                 });
+                return;
+            }
+            try {
+                // Catch up on alerts now rather than waiting for the background job.
+                EventCheck.check(this);
+            } catch (Exception ignored) {
+                // The list loaded; a failed alert check just waits for the next one.
             }
         });
     }
@@ -158,6 +175,7 @@ public class MainActivity extends Activity {
         for (int i = 0; i < total; i++) {
             JSONObject p = peers.optJSONObject(i);
             if (state(p) == State.ONLINE) online++;
+            if (p.optBoolean("self")) Api.prefs(this).edit().putString("self_name", p.optString("name")).apply();
             View row = row(p);
             list.addView(row);
             if (animateNext) {
@@ -206,7 +224,32 @@ public class MainActivity extends Activity {
                 ColorStateList.valueOf((iconColor & 0x00FFFFFF) | 0x26000000));
 
         ((TextView) row.findViewById(R.id.name)).setText(self ? name + "  ·  this phone" : name);
-        ((TextView) row.findViewById(R.id.status)).setText(p.optString("ip").replace("/32", "") + "  ·  " + describe(st, p));
+        JSONObject timer = p.optJSONObject("timer");
+        ((TextView) row.findViewById(R.id.status)).setText(p.optString("ip").replace("/32", "") + "  ·  " + describe(st, p)
+                + (timer != null ? "  ·  " + Api.timerText(timer) : ""));
+
+        String domain = p.optString("domain", "");
+        if (!domain.isEmpty() && !p.isNull("domain")) {
+            TextView d = row.findViewById(R.id.domain);
+            d.setText(domain);
+            d.setVisibility(View.VISIBLE);
+            d.setOnLongClickListener(v -> {
+                getSystemService(android.content.ClipboardManager.class)
+                        .setPrimaryClip(android.content.ClipData.newPlainText("domain", domain));
+                Toast.makeText(this, "Copied " + domain, Toast.LENGTH_SHORT).show();
+                return true;
+            });
+        }
+
+        JSONObject pub = p.optJSONObject("public_ip");
+        String pubText = Api.publicIpText(pub, "\n");
+        if (pubText != null) {
+            row.findViewById(R.id.publicRow).setVisibility(View.VISIBLE);
+            ((TextView) row.findViewById(R.id.publicIp)).setText(pubText);
+            // Green globe = live address; grey = last one seen.
+            ((ImageView) row.findViewById(R.id.publicIcon)).setImageTintList(ColorStateList.valueOf(
+                    getColor(pub.optBoolean("current") ? R.color.online : R.color.offline)));
+        }
 
         View dot = row.findViewById(R.id.dot);
         dot.setBackgroundTintList(ColorStateList.valueOf(color));
@@ -223,7 +266,7 @@ public class MainActivity extends Activity {
         // The server refuses this anyway; disabling it here makes the lockout guard visible.
         toggle.setEnabled(!self);
         toggle.setOnCheckedChangeListener((b, on) -> setPeer(name, on, toggle));
-        row.setOnClickListener(v -> { if (toggle.isEnabled()) toggle.toggle(); });
+        row.setOnClickListener(v -> startActivity(new Intent(this, DeviceActivity.class).putExtra(DeviceActivity.EXTRA_PEER, name)));
         return row;
     }
 
@@ -243,7 +286,7 @@ public class MainActivity extends Activity {
         setLoading(true);
         io.execute(() -> {
             try {
-                call("POST", "/peers/" + name + (on ? "/enable" : "/disable"));
+                Api.call(this, "POST", "/peers/" + name + (on ? "/enable" : "/disable"));
                 runOnUiThread(this::refresh);
             } catch (Exception e) {
                 runOnUiThread(() -> {
@@ -252,39 +295,6 @@ public class MainActivity extends Activity {
                 });
             }
         });
-    }
-
-    private String call(String method, String path) throws IOException {
-        HttpURLConnection c = (HttpURLConnection) new URL(API + path).openConnection();
-        try {
-            c.setRequestMethod(method);
-            c.setConnectTimeout(5000);
-            c.setReadTimeout(5000);
-            c.setRequestProperty("Authorization", "Bearer " + token());
-            int code = c.getResponseCode();
-            String body = read(code < 400 ? c.getInputStream() : c.getErrorStream());
-            if (code >= 400) {
-                String msg = body;
-                try {
-                    msg = new JSONObject(body).optString("error", body);
-                } catch (Exception ignored) {
-                }
-                throw new IOException("Server said: " + msg);
-            }
-            return body;
-        } finally {
-            c.disconnect();
-        }
-    }
-
-    private static String read(InputStream in) throws IOException {
-        if (in == null) return "";
-        try (in) {
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            byte[] buf = new byte[4096];
-            for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
-            return out.toString(StandardCharsets.UTF_8.name());
-        }
     }
 
     private int dp(int v) {

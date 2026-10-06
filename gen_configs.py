@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives import serialization
 ENDPOINT = sys.argv[1] if len(sys.argv) > 1 else "vpn.forgenerative.ai"
 PORT = 51820
 SUBNET = "10.100.0.0/24"
-PEERS = {"homepc": 2, "laptop": 3, "phone": 4}
+PEERS = {"homepc": 2, "work": 3, "phone": 4, "laptop": 5}
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
 KEYFILE = os.path.join(OUT, "keys.json")
 
