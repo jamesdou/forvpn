@@ -14,9 +14,20 @@ timers ("on for 2 hours") and daily schedules ("off at 01:00").
   GET    /schedules
   POST   /schedules                 body {peer, action: enable|disable, time: "HH:MM", days: "0123456", tz}
   DELETE /schedules/<id>
+  POST   /peers/<name>/rdp_mode     body {"mode": "direct"|"tunnel"}: Remote Desktop access on that PC
+  POST   /peers/<name>/ssh          body {"enabled": bool}: SSH server on that PC
+  POST   /peers/<name>/keys         body {"name", "key"}: allow a device's SSH public key
+  DELETE /peers/<name>/keys/<name>
+
+Device helper (rdp-agent.ps1), identified by its VPN address instead of the token -
+WireGuard guarantees a packet from 10.100.0.x came from that device's key:
+  GET    /agent                     -> {"rdp_mode", "ssh_enabled", "keys"} wanted for the calling device
+  POST   /agent/status              body {"applied", "sshd", "error", "keys"}
 
 Every request needs header "Authorization: Bearer <token>" (token in TOKEN_FILE).
 """
+import base64
+import hashlib
 import hmac
 import json
 import os
@@ -142,11 +153,21 @@ def open_db():
             peer TEXT, ip TEXT, first_seen REAL, PRIMARY KEY (peer, ip));
         CREATE TABLE IF NOT EXISTS timers (
             peer TEXT PRIMARY KEY, action TEXT, at REAL);
+        CREATE TABLE IF NOT EXISTS rdp_mode (
+            peer TEXT PRIMARY KEY, mode TEXT, ts REAL);
+        CREATE TABLE IF NOT EXISTS agent_status (
+            peer TEXT PRIMARY KEY, applied TEXT, sshd INTEGER, error TEXT, ts REAL);
+        CREATE TABLE IF NOT EXISTS ssh_wanted (
+            peer TEXT PRIMARY KEY, enabled INTEGER, keys TEXT);
         CREATE TABLE IF NOT EXISTS last_ip (
             peer TEXT PRIMARY KEY, ip TEXT, ts REAL);
         CREATE TABLE IF NOT EXISTS schedules (
             id INTEGER PRIMARY KEY, peer TEXT, action TEXT, time TEXT, days TEXT, tz TEXT);
     """)
+    try:
+        conn.execute("ALTER TABLE agent_status ADD COLUMN keys TEXT")  # added after the first release
+    except sqlite3.OperationalError:
+        pass
     # Backfill from history for devices not seen since last_ip was added: their latest
     # "from <ip>" connection, dated by their most recent event of any kind.
     conn.execute("""
@@ -168,13 +189,56 @@ def log_event(peer, kind, detail="", source="monitor", ts=None):
     threading.Thread(target=push, args=(peer, kind, detail, source), daemon=True).start()
 
 
+KEY_LINE = re.compile(r"(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)) ([A-Za-z0-9+/]+={0,2})")
+KEY_NAME = re.compile(r"[A-Za-z0-9._-]{1,32}")
+
+
+def parse_key(key, name):
+    """Return a clean "type base64 name" line, or None. Plain keys only: no SSH options, no extra lines."""
+    m = KEY_LINE.fullmatch(" ".join(str(key).split()[:2]))
+    if not m or not KEY_NAME.fullmatch(str(name)):
+        return None
+    try:
+        blob = base64.b64decode(m[2], validate=True)
+    except ValueError:
+        return None
+    # The blob starts with its own key type; a mismatch means a mangled paste.
+    n = int.from_bytes(blob[:4], "big")
+    if blob[4:4 + n].decode(errors="replace") != m[1]:
+        return None
+    return f"{m[1]} {m[2]} {name}"
+
+
+def describe_key(line):
+    kind, b64, *rest = line.split()
+    digest = base64.b64encode(hashlib.sha256(base64.b64decode(b64)).digest()).decode().rstrip("=")
+    return {"name": rest[-1] if rest else "", "type": kind.replace("ssh-", ""), "fingerprint": "SHA256:" + digest}
+
+
+def ssh_wanted(name):
+    """(enabled, [key lines] or None if not known yet) for a PC."""
+    with lock:
+        r = db.execute("SELECT * FROM ssh_wanted WHERE peer = ?", (name,)).fetchone()
+    if not r:
+        return True, None
+    return bool(r["enabled"]), (json.loads(r["keys"]) if r["keys"] is not None else None)
+
+
+def save_ssh_wanted(name, enabled, keys):
+    with lock:
+        db.execute("INSERT OR REPLACE INTO ssh_wanted VALUES (?, ?, ?)",
+                   (name, int(enabled), json.dumps(keys) if keys is not None else None))
+        db.commit()
+
+
 def push(peer, kind, detail, source):
     """Instant phone notification via ntfy, if NTFY_FILE configures a topic."""
     try:
         cfg = json.load(open(NTFY_FILE))
     except (FileNotFoundError, ValueError):
         return
-    security = kind == "new_ip"
+    # A new SSH key is a way in, so it alerts even when added from the app.
+    security = kind in ("new_ip", "ssh_key_added")
     # Same rules as the app: skip changes you made yourself and your own phone's comings and goings.
     if not security and (source == "app" or peer in cfg.get("quiet_peers", [])):
         return
@@ -183,11 +247,16 @@ def push(peer, kind, detail, source):
         "connected": f"{peer} connected",
         "disconnected": f"{peer} disconnected",
         "reconnected": f"{peer} reconnected",
+        "rdp_mode": f"{peer}: Remote Desktop access changed",
+        "ssh_key_added": f"{peer}: SSH key added",
+        "ssh_key_removed": f"{peer}: SSH key removed",
+        "ssh": f"{peer}: SSH server changed",
         "new_ip": f"{peer} connected from a new address",
         "enabled": f"{peer} turned on{by}",
         "disabled": f"{peer} turned off{by}",
     }.get(kind, f"{peer}: {kind}")
-    body = detail + (". If this wasn't you, turn the device off in WG Switch." if security else "")
+    body = detail + (". If this wasn't you, turn the device off in WG Switch." if kind == "new_ip" else
+                     ". If this wasn't you, remove the key in WG Switch." if kind == "ssh_key_added" else "")
     req = urllib.request.Request(cfg["url"], data=(body or title).encode(), headers={
         "Title": title,
         "Priority": "high" if security else "default",
@@ -382,10 +451,26 @@ class Handler(BaseHTTPRequestHandler):
     def _is_requester(self, peer):
         return peer["ip"].split("/")[0] == self.client_address[0]
 
+    def _calling_peer(self):
+        """Name of the device whose VPN address sent this request, or None."""
+        for name, p in load_peers().items():
+            if self._is_requester(p):
+                return name
+        return None
+
     def do_GET(self):
+        url = urlparse(self.path)
+        if url.path == "/agent":
+            name = self._calling_peer()
+            if not name:
+                return self._send(403, {"error": "unknown device"})
+            with lock:
+                r = db.execute("SELECT mode FROM rdp_mode WHERE peer = ?", (name,)).fetchone()
+            enabled, keys = ssh_wanted(name)
+            return self._send(200, {"name": name, "rdp_mode": r["mode"] if r else "direct",
+                                    "ssh_enabled": enabled, "keys": keys})
         if not self._authorized():
             return
-        url = urlparse(self.path)
         if url.path == "/peers":
             return self._send(200, self.list_peers())
         if url.path == "/events":
@@ -411,6 +496,8 @@ class Handler(BaseHTTPRequestHandler):
         with lock:
             timers = {r["peer"]: r for r in db.execute("SELECT * FROM timers")}
             last_ips = {r["peer"]: r for r in db.execute("SELECT * FROM last_ip")}
+            modes = {r["peer"]: r["mode"] for r in db.execute("SELECT * FROM rdp_mode")}
+            agents = {r["peer"]: r for r in db.execute("SELECT * FROM agent_status")}
         out = []
         for name, p in load_peers().items():
             hs, ip = live.get(p["pub"], (0, None))[:2]
@@ -431,15 +518,45 @@ class Handler(BaseHTTPRequestHandler):
                 "timer": {"action": t["action"], "in": max(0, int(t["at"] - now))} if t else None,
                 "public_ip": public,
                 "domain": domains.get(name),
+                # only for PCs running the helper; "applied" is what the PC reports it actually did
+                "agent": self.agent_view(name, modes, agents[name], now) if name in agents else None,
             })
         return out
 
+    @staticmethod
+    def agent_view(name, modes, a, now):
+        enabled, wanted = ssh_wanted(name)
+        reported = json.loads(a["keys"]) if a["keys"] else []
+        keys = wanted if wanted is not None else reported
+        return {
+            "rdp_mode": modes.get(name, "direct"),
+            "applied": a["applied"],
+            "sshd": bool(a["sshd"]),
+            "ssh_enabled": enabled,
+            "error": a["error"] or None,
+            "seen_ago": int(now - a["ts"]),
+            # each key with whether the PC has actually applied it yet
+            "keys": [dict(describe_key(k), applied=k in reported) for k in keys],
+            "keys_pending": sorted(set(keys) ^ set(reported)) != [],
+        }
+
     def do_POST(self):
+        if self.path == "/agent/status":
+            return self.agent_status(self._body())
         if not self._authorized():
             return
         body = self._body()
         if self.path == "/schedules":
             return self.add_schedule(body)
+        m = re.fullmatch(r"/peers/([^/]+)/rdp_mode", self.path)
+        if m:
+            return self.set_rdp_mode(m[1], body.get("mode"))
+        m = re.fullmatch(r"/peers/([^/]+)/ssh", self.path)
+        if m:
+            return self.set_ssh(m[1], body.get("enabled"))
+        m = re.fullmatch(r"/peers/([^/]+)/keys", self.path)
+        if m:
+            return self.add_key(m[1], body.get("name"), body.get("key"))
         m = re.fullmatch(r"/peers/([^/]+)/(enable|disable)", self.path)
         peers = load_peers()
         if not m or m[1] not in peers:
@@ -459,6 +576,84 @@ class Handler(BaseHTTPRequestHandler):
             change_peer(name, enable, source="app")
         self._send(200, {"name": name, "enabled": enable})
 
+    def agent_status(self, b):
+        name = self._calling_peer()
+        if not name:
+            return self._send(403, {"error": "unknown device"})
+        reported = b.get("keys")
+        reported = [k for k in reported if isinstance(k, str)] if isinstance(reported, list) else None
+        with lock:
+            prev = db.execute("SELECT applied FROM agent_status WHERE peer = ?", (name,)).fetchone()
+            db.execute("INSERT OR REPLACE INTO agent_status (peer, applied, sshd, error, ts, keys) VALUES (?, ?, ?, ?, ?, ?)",
+                       (name, str(b.get("applied", "")), int(bool(b.get("sshd"))), str(b.get("error") or ""), time.time(),
+                        json.dumps(reported) if reported is not None else None))
+            db.commit()
+        enabled, wanted = ssh_wanted(name)
+        if wanted is None and reported is not None:
+            # First report from a helper that manages keys: adopt the PC's current keys as the list.
+            save_ssh_wanted(name, enabled, [k for k in reported if parse_key(k, k.split()[-1])])
+        if prev and prev["applied"] != b.get("applied"):
+            label = "tunnel only" if b.get("applied") == "tunnel" else "direct"
+            log_event(name, "rdp_mode", f"Remote Desktop access is now {label}", source="agent")
+        self._send(200, {"ok": True})
+
+    def set_rdp_mode(self, name, mode):
+        if name not in load_peers() or mode not in ("direct", "tunnel"):
+            return self._send(400, {"error": "need a known device and mode direct or tunnel"})
+        enabled, keys = ssh_wanted(name)
+        if mode == "tunnel":
+            if keys is not None and not keys:
+                return self._send(409, {"error": "add an SSH key first, or nothing could get through the tunnel"})
+            if not enabled:
+                save_ssh_wanted(name, True, keys)  # tunnel only needs the SSH server
+        with lock:
+            db.execute("INSERT OR REPLACE INTO rdp_mode VALUES (?, ?, ?)", (name, mode, time.time()))
+            db.commit()
+        self._send(200, {"name": name, "rdp_mode": mode})
+
+    def _rdp_mode(self, name):
+        with lock:
+            r = db.execute("SELECT mode FROM rdp_mode WHERE peer = ?", (name,)).fetchone()
+        return r["mode"] if r else "direct"
+
+    def set_ssh(self, name, enabled):
+        if name not in load_peers() or not isinstance(enabled, bool):
+            return self._send(400, {"error": "need a known device and enabled true/false"})
+        if not enabled and self._rdp_mode(name) == "tunnel":
+            return self._send(409, {"error": "switch Remote Desktop to Direct first; tunnel only needs SSH"})
+        _, keys = ssh_wanted(name)
+        save_ssh_wanted(name, enabled, keys)
+        log_event(name, "ssh", f"SSH server turned {'on' if enabled else 'off'}", source="app")
+        self._send(200, {"name": name, "ssh_enabled": enabled})
+
+    def add_key(self, name, key_name, key):
+        if name not in load_peers():
+            return self._send(404, {"error": "not found"})
+        line = parse_key(key or "", key_name or "")
+        if not line:
+            return self._send(400, {"error": "need a name (letters, digits, . _ -) and a public key line starting ssh-ed25519, ssh-rsa or ecdsa-"})
+        enabled, keys = ssh_wanted(name)
+        if keys is None:
+            return self._send(409, {"error": "the PC's helper hasn't reported its keys yet; try again in a minute"})
+        if any(k.split()[-1] == key_name for k in keys):
+            return self._send(409, {"error": f"a key named {key_name} already exists"})
+        if any(k.split()[1] == line.split()[1] for k in keys):
+            return self._send(409, {"error": "that key is already allowed"})
+        save_ssh_wanted(name, enabled, keys + [line])
+        log_event(name, "ssh_key_added", f"key {key_name} ({describe_key(line)['fingerprint'][:20]}...)", source="app")
+        self._send(200, {"name": name, "key": describe_key(line)})
+
+    def remove_key(self, name, key_name):
+        enabled, keys = ssh_wanted(name)
+        if name not in load_peers() or keys is None or not any(k.split()[-1] == key_name for k in keys):
+            return self._send(404, {"error": "no such key"})
+        remaining = [k for k in keys if k.split()[-1] != key_name]
+        if not remaining and self._rdp_mode(name) == "tunnel":
+            return self._send(409, {"error": "that's the last key and Remote Desktop is tunnel only; switch to Direct first"})
+        save_ssh_wanted(name, enabled, remaining)
+        log_event(name, "ssh_key_removed", f"key {key_name}", source="app")
+        self._send(200, {"removed": key_name})
+
     def add_schedule(self, b):
         peers = load_peers()
         if b.get("peer") not in peers or b.get("action") not in ("enable", "disable"):
@@ -477,6 +672,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         if not self._authorized():
             return
+        k = re.fullmatch(r"/peers/([^/]+)/keys/([^/]+)", self.path)
+        if k:
+            return self.remove_key(k[1], k[2])
         m = re.fullmatch(r"/schedules/(\d+)", self.path)
         if not m:
             return self._send(404, {"error": "not found"})

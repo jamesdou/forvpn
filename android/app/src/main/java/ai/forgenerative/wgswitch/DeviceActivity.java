@@ -138,6 +138,13 @@ public class DeviceActivity extends Activity {
                 content.addView(chipRow(false));
             }
 
+            JSONObject agent = device.optJSONObject("agent");
+            if (agent != null) {
+                content.addView(section("Remote Desktop access"));
+                content.addView(rdpModeRow(agent));
+                content.addView(note(rdpStatus(agent)));
+            }
+
             content.addView(section("Daily schedules"));
             for (int i = 0; i < schedules.length(); i++) content.addView(scheduleRow(schedules.optJSONObject(i)));
             if (schedules.length() == 0) content.addView(note("No schedules yet."));
@@ -227,6 +234,66 @@ public class DeviceActivity extends Activity {
         return row;
     }
 
+    /** Direct / Tunnel only switch for PCs running the WG Switch helper. */
+    private View rdpModeRow(JSONObject agent) {
+        String mode = agent.optString("rdp_mode", "direct");
+        LinearLayout row = new LinearLayout(this);
+        String[][] options = {{"direct", "Direct"}, {"tunnel", "Tunnel only"}};
+        for (int i = 0; i < options.length; i++) {
+            String value = options[i][0];
+            TextView chip = chip(options[i][1]);
+            chip.setSelected(value.equals(mode));
+            chip.setOnClickListener(v -> {
+                if (value.equals(mode)) return;
+                if (value.equals("tunnel")) {
+                    new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                            .setTitle("Tunnel only?")
+                            .setMessage("Direct Remote Desktop connections to " + peer + " will be blocked, "
+                                    + "including any session connected directly right now.\n\n"
+                                    + "Connect through the SSH tunnel (rdp-via-tunnel.bat) instead.")
+                            .setPositiveButton("Switch", (dlg, w) -> setRdpMode(value))
+                            .setNegativeButton("Cancel", null)
+                            .show();
+                } else {
+                    setRdpMode(value);
+                }
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(42), 1f);
+            if (i > 0) lp.leftMargin = dp(8);
+            row.addView(chip, lp);
+        }
+        return row;
+    }
+
+    private static String rdpStatus(JSONObject agent) {
+        String wanted = agent.optString("rdp_mode");
+        String applied = agent.optString("applied");
+        long ago = agent.optLong("seen_ago");
+        String status;
+        if (!agent.isNull("error") && !agent.optString("error").isEmpty()) {
+            status = "Problem: " + agent.optString("error");
+        } else if (!wanted.equals(applied)) {
+            status = "Applying… the PC picks up changes within about 10 seconds.";
+        } else {
+            status = "tunnel".equals(applied)
+                    ? "Only connections through the SSH tunnel are accepted."
+                    : "Remote Desktop accepts direct connections from your VPN devices.";
+        }
+        String seen = ago < 60 ? "just now" : Api.duration(ago) + " ago";
+        status += "\nHelper last checked in " + seen + (agent.optBoolean("sshd") ? " · SSH running" : " · SSH not running");
+        if (ago > 120) status += "\nThe PC may be off or offline; changes apply when it's back.";
+        return status;
+    }
+
+    private void setRdpMode(String mode) {
+        JSONObject body = new JSONObject();
+        try {
+            body.put("mode", mode);
+        } catch (Exception ignored) {
+        }
+        post("/peers/" + peer + "/rdp_mode", body, "tunnel".equals(mode) ? "Switching to tunnel only…" : "Switching to direct…");
+    }
+
     private TextView chip(String text) {
         TextView c = new TextView(this);
         c.setText(text);
@@ -281,7 +348,7 @@ public class DeviceActivity extends Activity {
         int color = getColor(switch (kind) {
             case "connected", "reconnected" -> R.color.online;
             case "new_ip" -> R.color.danger_start;
-            case "enabled" -> R.color.accent_start;
+            case "enabled", "rdp_mode" -> R.color.accent_start;
             default -> R.color.offline;
         });
         row.findViewById(R.id.dot).setBackgroundTintList(android.content.res.ColorStateList.valueOf(color));

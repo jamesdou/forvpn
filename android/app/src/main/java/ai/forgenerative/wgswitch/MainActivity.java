@@ -226,7 +226,9 @@ public class MainActivity extends Activity {
         ((TextView) row.findViewById(R.id.name)).setText(self ? name + "  ·  this phone" : name);
         JSONObject timer = p.optJSONObject("timer");
         ((TextView) row.findViewById(R.id.status)).setText(p.optString("ip").replace("/32", "") + "  ·  " + describe(st, p)
-                + (timer != null ? "  ·  " + Api.timerText(timer) : ""));
+                + (timer != null ? "  ·  " + Api.timerText(timer) : "")
+                + (p.optJSONObject("agent") != null && "tunnel".equals(p.optJSONObject("agent").optString("applied"))
+                        ? "  ·  Tunnel only" : ""));
 
         String domain = p.optString("domain", "");
         if (!domain.isEmpty() && !p.isNull("domain")) {

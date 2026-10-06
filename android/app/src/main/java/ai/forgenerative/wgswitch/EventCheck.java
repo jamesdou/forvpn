@@ -102,6 +102,7 @@ public class EventCheck extends JobService {
         return switch (e.optString("kind")) {
             case "connected" -> peer + " connected";
             case "disconnected" -> peer + " disconnected";
+            case "rdp_mode" -> peer + ": " + e.optString("detail");
             case "reconnected" -> peer + " reconnected";
             case "new_ip" -> peer + " connected from a new address";
             case "enabled" -> peer + " turned on" + by;
