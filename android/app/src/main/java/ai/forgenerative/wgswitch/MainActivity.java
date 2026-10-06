@@ -13,7 +13,6 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.animation.DecelerateInterpolator;
-import android.view.animation.LinearInterpolator;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -36,10 +35,9 @@ public class MainActivity extends Activity {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private LinearLayout list, hero;
     private TextView heroTitle, heroSub;
-    private ImageView heroIcon, refreshIcon;
+    private ImageView heroIcon;
     private ProgressBar progress;
     private SwipeRefreshLayout swipe;
-    private ObjectAnimator spin;
     private boolean animateNext = true;
 
     @Override
@@ -62,8 +60,6 @@ public class MainActivity extends Activity {
         heroSub = findViewById(R.id.heroSub);
         heroIcon = findViewById(R.id.heroIcon);
         progress = findViewById(R.id.progress);
-        refreshIcon = findViewById(R.id.refreshIcon);
-        findViewById(R.id.refresh).setOnClickListener(v -> refresh());
         swipe = findViewById(R.id.swipe);
         swipe.setColorSchemeColors(getColor(R.color.accent_start), getColor(R.color.accent_end));
         swipe.setProgressBackgroundColorSchemeColor(getColor(R.color.card));
@@ -82,17 +78,16 @@ public class MainActivity extends Activity {
             requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 1);
         }
 
-        spin = ObjectAnimator.ofFloat(refreshIcon, View.ROTATION, 0f, 360f);
-        spin.setDuration(800);
-        spin.setRepeatCount(ValueAnimator.INFINITE);
-        spin.setInterpolator(new LinearInterpolator());
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        if (token().isEmpty()) askToken();
-        else refresh();
+        // Nothing is shown or fetched until the biometric check passes.
+        AppLock.require(this, () -> {
+            if (token().isEmpty()) askToken();
+            else refresh();
+        });
     }
 
     @Override
@@ -127,13 +122,7 @@ public class MainActivity extends Activity {
 
     private void setLoading(boolean loading) {
         progress.setVisibility(loading ? View.VISIBLE : View.GONE);
-        if (loading) {
-            spin.start();
-        } else {
-            swipe.setRefreshing(false);
-            spin.cancel();
-            refreshIcon.animate().rotation(0f).setDuration(200).start();
-        }
+        if (!loading) swipe.setRefreshing(false);
     }
 
     private void refresh() {

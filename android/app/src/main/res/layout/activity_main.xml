@@ -63,21 +63,22 @@
         android:id="@+id/hero"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="24dp"
+        android:layout_marginTop="18dp"
         android:background="@drawable/bg_hero"
         android:elevation="8dp"
         android:gravity="center_vertical"
-        android:padding="22dp">
+        android:paddingHorizontal="18dp"
+        android:paddingVertical="12dp">
 
         <FrameLayout
-            android:layout_width="64dp"
-            android:layout_height="64dp"
+            android:layout_width="46dp"
+            android:layout_height="46dp"
             android:background="@drawable/bg_glass_circle">
 
             <ImageView
                 android:id="@+id/heroIcon"
-                android:layout_width="34dp"
-                android:layout_height="34dp"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
                 android:layout_gravity="center"
                 android:importantForAccessibility="no"
                 android:src="@drawable/ic_shield"
@@ -85,8 +86,8 @@
 
             <ProgressBar
                 android:id="@+id/progress"
-                android:layout_width="64dp"
-                android:layout_height="64dp"
+                android:layout_width="46dp"
+                android:layout_height="46dp"
                 android:indeterminate="true"
                 android:indeterminateTint="#CCFFFFFF"
                 android:visibility="gone" />
@@ -95,7 +96,7 @@
         <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginStart="18dp"
+            android:layout_marginStart="14dp"
             android:layout_weight="1"
             android:orientation="vertical">
 
@@ -105,7 +106,7 @@
                 android:layout_height="wrap_content"
                 android:text="Connecting…"
                 android:textColor="#FFFFFF"
-                android:textSize="24sp"
+                android:textSize="20sp"
                 android:textStyle="bold" />
 
             <TextView
@@ -157,39 +158,10 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
+        android:layout_marginBottom="12dp"
         android:gravity="center"
-        android:text="Tap a device for timers, schedules and history."
+        android:text="Pull down to refresh · tap a device for timers, schedules and history."
         android:textColor="@color/text_muted"
         android:textSize="12sp" />
 
-    <!-- Full-width primary action -->
-    <LinearLayout
-        android:id="@+id/refresh"
-        android:layout_width="match_parent"
-        android:layout_height="56dp"
-        android:layout_marginTop="14dp"
-        android:layout_marginBottom="16dp"
-        android:background="@drawable/bg_button"
-        android:clickable="true"
-        android:elevation="6dp"
-        android:focusable="true"
-        android:gravity="center">
-
-        <ImageView
-            android:id="@+id/refreshIcon"
-            android:layout_width="22dp"
-            android:layout_height="22dp"
-            android:importantForAccessibility="no"
-            android:src="@drawable/ic_refresh"
-            android:tint="#FFFFFF" />
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="10dp"
-            android:text="Refresh"
-            android:textColor="#FFFFFF"
-            android:textSize="17sp"
-            android:textStyle="bold" />
-    </LinearLayout>
 </LinearLayout>

@@ -5,10 +5,12 @@
     <!-- required for jobs that wait for a network connection -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <!-- keeps the periodic alert check scheduled after a reboot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
+        android:name=".WgApp"
         android:label="WG Switch"
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/AppTheme"

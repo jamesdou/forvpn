@@ -69,7 +69,7 @@ public class DeviceActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        load();
+        AppLock.require(this, this::load);
     }
 
     @Override
