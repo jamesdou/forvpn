@@ -16,15 +16,18 @@
         <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_marginEnd="12dp"
             android:layout_weight="1"
             android:orientation="vertical">
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:singleLine="true"
                 android:text="VPN Switch"
                 android:textColor="@color/text"
-                android:textSize="28sp"
+                android:textSize="24sp"
                 android:textStyle="bold" />
 
             <TextView
@@ -38,33 +41,33 @@
 
         <ImageButton
             android:id="@+id/connections"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
-            android:layout_marginEnd="10dp"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:layout_marginEnd="8dp"
             android:background="@drawable/bg_icon_button"
             android:contentDescription="Connections"
-            android:padding="12dp"
+            android:padding="11dp"
             android:scaleType="fitCenter"
             android:src="@drawable/ic_hub" />
 
         <ImageButton
             android:id="@+id/history"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
-            android:layout_marginEnd="10dp"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:layout_marginEnd="8dp"
             android:background="@drawable/bg_icon_button"
             android:contentDescription="Activity history"
-            android:padding="12dp"
+            android:padding="11dp"
             android:scaleType="fitCenter"
             android:src="@drawable/ic_history" />
 
         <ImageButton
             android:id="@+id/token"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
             android:background="@drawable/bg_icon_button"
             android:contentDescription="Set token"
-            android:padding="12dp"
+            android:padding="11dp"
             android:scaleType="fitCenter"
             android:src="@drawable/ic_key" />
     </LinearLayout>

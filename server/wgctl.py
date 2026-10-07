@@ -9,7 +9,7 @@ timers ("on for 2 hours") and daily schedules ("off at 01:00").
 
   GET    /peers?tz=ZONE             -> [{name, ip, domain, enabled, self, handshake_ago, timer, public_ip, traffic}]
   GET    /peers/<name>/traffic?tz=ZONE  -> live speed, session, today/7 days/month, last 14 days
-  GET    /connections               -> devices online now, with live speed and session length
+  GET    /connections               -> devices online now (live speed, session) and device-to-device links
   POST   /peers/<name>/enable       body {"minutes": N} optional: revert after N minutes
   POST   /peers/<name>/disable      body {"minutes": N} optional
   GET    /events?since=ID&peer=NAME&limit=N
@@ -312,6 +312,81 @@ def fmt_duration(seconds):
 
 
 # ---------------------------------------------------------------- monitor
+
+SERVICES = {3389: "Remote Desktop", 22: "SSH", 445: "File sharing", 139: "File sharing", 5900: "VNC",
+            80: "Web", 443: "Web", 53: "DNS", 8080: "Web"}
+
+
+def ensure_flow_tracking():
+    """Have the kernel track connections between devices, so /connections can list them.
+    The rule has no action (-j): it only matches and counts, allows and blocks nothing, and sits
+    at the end of FORWARD so it can never override a rule added later."""
+    rule = ["FORWARD", "-i", IFACE, "-o", IFACE, "-m", "conntrack", "--ctstate", "NEW,RELATED,ESTABLISHED"]
+    try:
+        subprocess.run(["sysctl", "-qw", "net.netfilter.nf_conntrack_acct=1", "net.netfilter.nf_conntrack_timestamp=1"],
+                       check=True, capture_output=True)
+        if subprocess.run(["iptables", "-C", *rule], capture_output=True).returncode != 0:
+            subprocess.run(["iptables", "-A", *rule], check=True, capture_output=True)
+    except Exception as e:
+        print(f"flow tracking unavailable: {e}", flush=True)
+
+
+link_samples = {}  # (src, dst, port) -> (bytes sent, bytes received, time) for live link speed
+
+
+def device_links():
+    """Open connections between two of your devices (never to/from the VPN server itself)."""
+    try:
+        out = subprocess.run(["conntrack", "-L", "-o", "extended,ktimestamp"], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return []
+    names = {p["ip"].split("/")[0]: n for n, p in load_peers().items()}
+    links = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 3 or parts[0] != "ipv4" or parts[2] not in ("tcp", "udp"):
+            continue
+        if parts[2] == "tcp" and "ESTABLISHED" not in parts:
+            continue  # handshakes and closing connections aren't "present"
+        if "[UNREPLIED]" in parts:
+            continue
+        fields = {}
+        for k, v in re.findall(r"([a-z-]+)=(\S+)", line):
+            fields.setdefault(k, []).append(v)
+        src, dst = fields.get("src", [None])[0], fields.get("dst", [None])[0]
+        if src not in names or dst not in names:
+            continue
+        sport, port = int(fields["sport"][0]), int(fields["dport"][0])
+        sent = int(fields.get("bytes", ["0"])[0])
+        received = int(fields.get("bytes", ["0", "0"])[1]) if len(fields.get("bytes", [])) > 1 else 0
+        # Tracking can pick up a connection mid-stream from the server's side's first packet,
+        # recording it backwards (e.g. work:3389 -> homepc:61602). The side on a known service
+        # port, or the non-temporary port, is the one that was connected to.
+        if (sport in SERVICES and port not in SERVICES) or (port >= 49152 > sport):
+            src, dst, sport, port, sent, received = dst, src, port, sport, received, sent
+        # TCP and UDP to the same service (Remote Desktop uses both) merge into one link.
+        key = (names[src], names[dst], port)
+        age = int(fields.get("delta-time", ["0"])[0])
+        l = links.setdefault(key, {"sent": 0, "received": 0, "seconds": 0})
+        l["sent"] += sent
+        l["received"] += received
+        l["seconds"] = max(l["seconds"], age)
+    now = time.time()
+    result = []
+    for (a, b, port), l in links.items():
+        prev = link_samples.get((a, b, port))
+        link_samples[(a, b, port)] = (l["sent"], l["received"], now)
+        rate_sent = rate_received = 0
+        if prev and now > prev[2]:
+            rate_sent = max(0, l["sent"] - prev[0]) / (now - prev[2])
+            rate_received = max(0, l["received"] - prev[1]) / (now - prev[2])
+        result.append({"from": a, "to": b, "port": port, "service": SERVICES.get(port, f"port {port}"),
+                       "seconds": l["seconds"], "sent": l["sent"], "received": l["received"],
+                       "sent_rate": round(rate_sent), "received_rate": round(rate_received)})
+    for key in [k for k in link_samples if k not in links]:
+        del link_samples[key]  # forget closed connections
+    return sorted(result, key=lambda x: (x["from"], x["to"], x["port"]))
+
 
 speeds = {}  # name -> {"up": bytes/s, "down": bytes/s, "session_up", "session_down"}; from the device's side
 monitor = None
@@ -624,7 +699,7 @@ class Handler(BaseHTTPRequestHandler):
                 "down_rate": round(sp.get("down", 0)), "up_rate": round(sp.get("up", 0)),
                 "session_down": sp.get("session_down", 0), "session_up": sp.get("session_up", 0),
             })
-        return {"devices": out}
+        return {"devices": out, "links": device_links()}
 
     def list_peers(self, tz=None):
         disabled, live, now = load_disabled(), dump(), time.time()
@@ -845,6 +920,7 @@ if __name__ == "__main__":
     TOKEN = open(TOKEN_FILE).read().strip()
     db = open_db()
     apply_state()
+    ensure_flow_tracking()
     refresh_domains()
     monitor = Monitor()
     threading.Thread(target=monitor.loop, daemon=True).start()

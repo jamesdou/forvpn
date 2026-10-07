@@ -86,8 +86,9 @@ public class ConnectionsActivity extends Activity {
         if (content.getChildCount() == 0) progress.setVisibility(View.VISIBLE);
         io.execute(() -> {
             try {
-                JSONArray devices = new JSONObject(Api.call(this, "GET", "/connections")).optJSONArray("devices");
-                runOnUiThread(() -> render(devices));
+                JSONObject res = new JSONObject(Api.call(this, "GET", "/connections"));
+                JSONArray devices = res.optJSONArray("devices"), links = res.optJSONArray("links");
+                runOnUiThread(() -> render(devices, links == null ? new JSONArray() : links));
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     content.removeAllViews();
@@ -102,15 +103,18 @@ public class ConnectionsActivity extends Activity {
         });
     }
 
-    private void render(JSONArray devices) {
+    private void render(JSONArray devices, JSONArray links) {
         content.removeAllViews();
-        map.setDevices(devices);
+        map.setDevices(devices, links);
         if (map.getParent() == null) {
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(280));
             lp.topMargin = dp(8);
             map.setLayoutParams(lp);
         }
         content.addView(map);
+
+        content.addView(section(links.length() == 0 ? "No connections between devices" : "Active connections · " + links.length()));
+        for (int i = 0; i < links.length(); i++) content.addView(linkCard(links.optJSONObject(i)));
 
         int online = 0;
         for (int i = 0; i < devices.length(); i++) if (devices.optJSONObject(i).optBoolean("online")) online++;
@@ -126,7 +130,25 @@ public class ConnectionsActivity extends Activity {
                 if (!dev.optBoolean("online")) content.addView(card(dev));
             }
         }
-        content.addView(note("Every device connects through your VPN server, so the map shows each device's link to it."));
+        content.addView(note("Every device connects through your VPN server: spokes are each device's tunnel, "
+                + "arcs are connections between two of your devices."));
+    }
+
+    /** "work → homepc", Remote Desktop, how long, and data each way. */
+    private View linkCard(JSONObject l) {
+        View row = LayoutInflater.from(this).inflate(R.layout.item_schedule, content, false);
+        ImageView icon = row.findViewById(R.id.icon);
+        int port = l.optInt("port");
+        icon.setImageResource(port == 3389 ? R.drawable.ic_desktop : port == 22 ? R.drawable.ic_key : R.drawable.ic_hub);
+        ((TextView) row.findViewById(R.id.title)).setText(l.optString("from") + "  →  " + l.optString("to"));
+        double out = l.optDouble("sent_rate"), back = l.optDouble("received_rate");
+        String detail = l.optString("service") + (port == 22 ? " (terminal or Remote Desktop tunnel)" : "")
+                + "  ·  " + Api.duration(l.optLong("seconds"))
+                + "\n→ " + Api.bytes(l.optDouble("sent")) + "   ← " + Api.bytes(l.optDouble("received"));
+        if (out + back >= Api.BUSY_BYTES_PER_SEC) detail += "  ·  now → " + Api.rate(out) + "  ← " + Api.rate(back);
+        ((TextView) row.findViewById(R.id.days)).setText(detail);
+        row.findViewById(R.id.delete).setVisibility(View.GONE);  // nothing to delete; this is a live view
+        return row;
     }
 
     private View card(JSONObject dev) {
