@@ -66,6 +66,7 @@ public class MainActivity extends Activity {
         swipe.setOnRefreshListener(this::refresh);
         findViewById(R.id.token).setOnClickListener(v -> askToken());
         findViewById(R.id.history).setOnClickListener(v -> startActivity(new Intent(this, DeviceActivity.class)));
+        findViewById(R.id.connections).setOnClickListener(v -> startActivity(new Intent(this, ConnectionsActivity.class)));
 
         EventCheck.createChannels(this);
         try {
@@ -129,7 +130,7 @@ public class MainActivity extends Activity {
         setLoading(true);
         io.execute(() -> {
             try {
-                JSONArray peers = new JSONArray(Api.call(this, "GET", "/peers"));
+                JSONArray peers = new JSONArray(Api.call(this, "GET", "/peers?" + Api.tzQuery()));
                 runOnUiThread(() -> {
                     setLoading(false);
                     show(peers);
@@ -230,6 +231,18 @@ public class MainActivity extends Activity {
                 Toast.makeText(this, "Copied " + domain, Toast.LENGTH_SHORT).show();
                 return true;
             });
+        }
+
+        JSONObject traffic = p.optJSONObject("traffic");
+        if (traffic != null) {
+            double down = traffic.optDouble("down_rate"), up = traffic.optDouble("up_rate");
+            String m = "⇅ " + Api.bytes(traffic.optDouble("today_down") + traffic.optDouble("today_up")) + " today";
+            if (st == State.ONLINE && down + up >= Api.BUSY_BYTES_PER_SEC) {
+                m += "  ·  ↓ " + Api.rate(down) + "  ↑ " + Api.rate(up);
+            }
+            TextView metric = row.findViewById(R.id.metric);
+            metric.setText(m);
+            metric.setVisibility(View.VISIBLE);
         }
 
         JSONObject pub = p.optJSONObject("public_ip");

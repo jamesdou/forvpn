@@ -47,7 +47,7 @@ final class AppLock {
         int can = a.getSystemService(BiometricManager.class).canAuthenticate(AUTHENTICATORS);
         if (can != BiometricManager.BIOMETRIC_SUCCESS) {
             // Required means required: without any screen lock there is nothing to check against.
-            message.setText("Set up a fingerprint, face unlock or screen lock on this phone to use WG Switch.\n\nTap to open Settings.");
+            message.setText("Set up a fingerprint, face unlock or screen lock on this phone to use VPN Switch.\n\nTap to open Settings.");
             message.setOnClickListener(v -> a.startActivity(new Intent(Settings.ACTION_SECURITY_SETTINGS)));
             return;
         }
@@ -55,7 +55,7 @@ final class AppLock {
         message.setOnClickListener(v -> require(a, onUnlocked));
 
         BiometricPrompt prompt = new BiometricPrompt.Builder(a)
-                .setTitle("Unlock WG Switch")
+                .setTitle("Unlock VPN Switch")
                 .setSubtitle("Confirm it's you to manage your VPN")
                 .setAllowedAuthenticators(AUTHENTICATORS)
                 .build();
@@ -106,7 +106,7 @@ final class AppLock {
         col.addView(circle, new LinearLayout.LayoutParams(circleSize, circleSize));
 
         TextView title = new TextView(a);
-        title.setText("WG Switch is locked");
+        title.setText("VPN Switch is locked");
         title.setTextColor(a.getColor(R.color.text));
         title.setTextSize(22);
         title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);

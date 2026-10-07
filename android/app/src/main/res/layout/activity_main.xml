@@ -22,7 +22,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="WG Switch"
+                android:text="VPN Switch"
                 android:textColor="@color/text"
                 android:textSize="28sp"
                 android:textStyle="bold" />
@@ -35,6 +35,17 @@
                 android:textColor="@color/text_muted"
                 android:textSize="14sp" />
         </LinearLayout>
+
+        <ImageButton
+            android:id="@+id/connections"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginEnd="10dp"
+            android:background="@drawable/bg_icon_button"
+            android:contentDescription="Connections"
+            android:padding="12dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_hub" />
 
         <ImageButton
             android:id="@+id/history"

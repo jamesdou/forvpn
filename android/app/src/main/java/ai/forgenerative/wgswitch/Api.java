@@ -91,6 +91,32 @@ final class Api {
         return "Last " + pub.optString("ip") + sep + (ago < 60 ? "just now" : duration(ago) + " ago");
     }
 
+    /** Network speed from bytes/second, in bits like ISPs quote: "2.1 Mb/s", "80 kb/s". */
+    static String rate(double bytesPerSec) {
+        double bits = bytesPerSec * 8;
+        if (bits >= 1e9) return String.format(java.util.Locale.ROOT, "%.1f Gb/s", bits / 1e9);
+        if (bits >= 1e6) return String.format(java.util.Locale.ROOT, "%.1f Mb/s", bits / 1e6);
+        if (bits >= 1e3) return String.format(java.util.Locale.ROOT, "%.0f kb/s", bits / 1e3);
+        return String.format(java.util.Locale.ROOT, "%.0f b/s", bits);
+    }
+
+    /** Data amount: "340 MB", "1.2 GB". */
+    static String bytes(double n) {
+        if (n >= 1e12) return String.format(java.util.Locale.ROOT, "%.1f TB", n / 1e12);
+        if (n >= 1e9) return String.format(java.util.Locale.ROOT, "%.1f GB", n / 1e9);
+        if (n >= 1e6) return String.format(java.util.Locale.ROOT, "%.0f MB", n / 1e6);
+        if (n >= 1e3) return String.format(java.util.Locale.ROOT, "%.0f KB", n / 1e3);
+        return String.format(java.util.Locale.ROOT, "%.0f B", n);
+    }
+
+    /** Below this a tunnel is only exchanging keepalives, so live speed isn't worth showing. */
+    static final double BUSY_BYTES_PER_SEC = 2_000;
+
+    /** Phone's time zone, so "today" on the server means today here. */
+    static String tzQuery() {
+        return "tz=" + java.net.URLEncoder.encode(java.util.TimeZone.getDefault().getID(), StandardCharsets.UTF_8);
+    }
+
     /** Short description of a pending timer, e.g. "Off in 1 h 52 min". */
     static String timerText(JSONObject timer) {
         return ("disable".equals(timer.optString("action")) ? "Off in " : "On in ")

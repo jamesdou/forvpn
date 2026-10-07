@@ -3,13 +3,15 @@
 #     direct - Windows' normal Remote Desktop rules; this script adds nothing.
 #     tunnel - one block rule for inbound port 3389 from the network. Connections through the
 #              SSH tunnel arrive on loopback, which Windows Firewall does not filter, so they still work.
-#   SSH server on/off, and which device keys may use the "tunnel" account.
+#   SSH server on/off, which device keys may use SSH, and terminal access (your account, key + password).
 # Installed by install-rdp-agent.ps1 as a scheduled task running as SYSTEM.
 $ErrorActionPreference = "Stop"
 $api = "http://10.100.0.1:8080"  # reachable only through the WireGuard tunnel
 $group = "WG Switch RDP mode"
 $interval = 10
 $keysFile = "$env:ProgramData\ssh\tunnel_authorized_keys"
+$sshdConfig = "$env:ProgramData\ssh\sshd_config"
+$sshdExe = "$env:WINDIR\System32\OpenSSH\sshd.exe"
 # Plain public keys only - never SSH options like command= or permitopen=, even if the server sent them.
 $keyPattern = '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/]+={0,2} [A-Za-z0-9._-]{1,32}$'
 
@@ -49,6 +51,36 @@ function Sync-Keys($wanted) {
     }
 }
 
+# Terminal access = your account listed on the AllowUsers line next to "tunnel".
+# setup-ssh-tunnel-account.ps1 writes a "Match User <you>" block naming the account.
+function Get-ShellUser {
+    $m = [IO.File]::ReadAllLines($sshdConfig) | Where-Object { $_ -match '^Match User (\S+)$' -and $Matches[1] -ne "tunnel" } |
+        Select-Object -First 1
+    if ($m -match '^Match User (\S+)$') { return $Matches[1] } else { return $null }
+}
+
+function Test-Shell {
+    $u = Get-ShellUser
+    $line = [IO.File]::ReadAllLines($sshdConfig) | Where-Object { $_ -match '^AllowUsers ' } | Select-Object -First 1
+    return [bool]($u -and $line -and ($line -split ' ') -contains $u)
+}
+
+function Set-Shell($on) {
+    if ((Test-Shell) -eq $on) { return }
+    $u = Get-ShellUser
+    if (-not $u) { throw "terminal access isn't set up on this PC yet (run setup-ssh-tunnel-account.ps1)" }
+    $before = [IO.File]::ReadAllLines($sshdConfig)
+    $after = $before | ForEach-Object { if ($_ -match '^AllowUsers ') { "AllowUsers tunnel$(if ($on) { " $u" })" } else { $_ } }
+    [IO.File]::WriteAllLines($sshdConfig, [string[]]$after)
+    & $sshdExe -t 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        [IO.File]::WriteAllLines($sshdConfig, [string[]]$before)
+        throw "sshd rejected the terminal access change; left as it was"
+    }
+    # sshd only reads AllowUsers at start. Restarting drops open SSH sessions, not Remote Desktop.
+    if (Test-Sshd) { Restart-Service sshd }
+}
+
 function Set-Ssh($on) {
     $s = Get-Service sshd -ErrorAction SilentlyContinue
     if (-not $s) { throw "OpenSSH Server is not installed" }
@@ -68,6 +100,7 @@ while ($true) {
         $cfg = Invoke-RestMethod "$api/agent" -TimeoutSec 5
         $want = $cfg.rdp_mode
         if ($null -ne $cfg.keys) { Sync-Keys @($cfg.keys) }  # null = server hasn't learned our keys yet
+        if ($null -ne $cfg.shell_enabled) { Set-Shell ([bool]$cfg.shell_enabled) }
         # Tunnel only always needs SSH, whatever the on/off setting says.
         Set-Ssh ($want -eq "tunnel" -or $cfg.ssh_enabled -ne $false)
         if ($want -eq "tunnel") {
@@ -85,7 +118,7 @@ while ($true) {
         $err = $_.Exception.Message
     }
     try {
-        $body = @{ applied = (Get-Applied); sshd = (Test-Sshd); error = $err; keys = @(Get-Keys) } | ConvertTo-Json -Compress
+        $body = @{ applied = (Get-Applied); sshd = (Test-Sshd); error = $err; keys = @(Get-Keys); shell = (Test-Shell) } | ConvertTo-Json -Compress
         Invoke-RestMethod "$api/agent/status" -Method Post -Body $body -ContentType "application/json" -TimeoutSec 5 | Out-Null
     } catch {
         # Server unreachable; report again next round.

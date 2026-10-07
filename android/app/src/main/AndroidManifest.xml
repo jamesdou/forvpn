@@ -11,7 +11,7 @@
 
     <application
         android:name=".WgApp"
-        android:label="WG Switch"
+        android:label="VPN Switch"
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/AppTheme"
         android:networkSecurityConfig="@xml/network_security_config">
@@ -25,6 +25,9 @@
         </activity>
         <activity
             android:name=".DeviceActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ConnectionsActivity"
             android:exported="false" />
         <service
             android:name=".EventCheck"

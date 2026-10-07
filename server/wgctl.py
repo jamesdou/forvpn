@@ -7,7 +7,9 @@ other peer is untouched. Disabled peers are remembered across reboots.
 A background monitor records connect/disconnect/new-IP events and runs
 timers ("on for 2 hours") and daily schedules ("off at 01:00").
 
-  GET    /peers                     -> [{name, ip, domain, enabled, self, handshake_ago, timer, public_ip}]
+  GET    /peers?tz=ZONE             -> [{name, ip, domain, enabled, self, handshake_ago, timer, public_ip, traffic}]
+  GET    /peers/<name>/traffic?tz=ZONE  -> live speed, session, today/7 days/month, last 14 days
+  GET    /connections               -> devices online now, with live speed and session length
   POST   /peers/<name>/enable       body {"minutes": N} optional: revert after N minutes
   POST   /peers/<name>/disable      body {"minutes": N} optional
   GET    /events?since=ID&peer=NAME&limit=N
@@ -16,13 +18,14 @@ timers ("on for 2 hours") and daily schedules ("off at 01:00").
   DELETE /schedules/<id>
   POST   /peers/<name>/rdp_mode     body {"mode": "direct"|"tunnel"}: Remote Desktop access on that PC
   POST   /peers/<name>/ssh          body {"enabled": bool}: SSH server on that PC
+  POST   /peers/<name>/shell        body {"enabled": bool}: terminal access (device key + Windows password)
   POST   /peers/<name>/keys         body {"name", "key"}: allow a device's SSH public key
   DELETE /peers/<name>/keys/<name>
 
 Device helper (rdp-agent.ps1), identified by its VPN address instead of the token -
 WireGuard guarantees a packet from 10.100.0.x came from that device's key:
-  GET    /agent                     -> {"rdp_mode", "ssh_enabled", "keys"} wanted for the calling device
-  POST   /agent/status              body {"applied", "sshd", "error", "keys"}
+  GET    /agent                     -> {"rdp_mode", "ssh_enabled", "keys", "shell_enabled"} for the calling device
+  POST   /agent/status              body {"applied", "sshd", "error", "keys", "shell"}
 
 Every request needs header "Authorization: Bearer <token>" (token in TOKEN_FILE).
 """
@@ -38,7 +41,7 @@ import subprocess
 import threading
 import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
@@ -130,13 +133,13 @@ def apply_state():
 
 
 def dump():
-    """{pubkey: (latest handshake unix time, endpoint ip, endpoint ip:port, bytes received)}."""
+    """{pubkey: (latest handshake, endpoint ip, endpoint ip:port, bytes received, bytes sent)}."""
     out = {}
     for row in wg("show", IFACE, "dump").splitlines()[1:]:
         cols = row.split("\t")
         endpoint = None if cols[2] == "(none)" else cols[2]
         ip = endpoint.rsplit(":", 1)[0].strip("[]") if endpoint else None
-        out[cols[0]] = (int(cols[4]), ip, endpoint, int(cols[5]))
+        out[cols[0]] = (int(cols[4]), ip, endpoint, int(cols[5]), int(cols[6]))
     return out
 
 
@@ -161,13 +164,17 @@ def open_db():
             peer TEXT PRIMARY KEY, enabled INTEGER, keys TEXT);
         CREATE TABLE IF NOT EXISTS last_ip (
             peer TEXT PRIMARY KEY, ip TEXT, ts REAL);
+        CREATE TABLE IF NOT EXISTS usage (
+            peer TEXT, hour INTEGER, up INTEGER, down INTEGER, PRIMARY KEY (peer, hour));
         CREATE TABLE IF NOT EXISTS schedules (
             id INTEGER PRIMARY KEY, peer TEXT, action TEXT, time TEXT, days TEXT, tz TEXT);
     """)
-    try:
-        conn.execute("ALTER TABLE agent_status ADD COLUMN keys TEXT")  # added after the first release
-    except sqlite3.OperationalError:
-        pass
+    for table, column in (("agent_status", "keys TEXT"), ("agent_status", "shell INTEGER"),
+                          ("ssh_wanted", "shell INTEGER")):  # columns added after the first release
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+        except sqlite3.OperationalError:
+            pass
     # Backfill from history for devices not seen since last_ip was added: their latest
     # "from <ip>" connection, dated by their most recent event of any kind.
     conn.execute("""
@@ -224,10 +231,19 @@ def ssh_wanted(name):
     return bool(r["enabled"]), (json.loads(r["keys"]) if r["keys"] is not None else None)
 
 
-def save_ssh_wanted(name, enabled, keys):
+def shell_wanted(name):
+    """True/False for terminal access, or None if not known yet (the PC's setting is left alone)."""
     with lock:
-        db.execute("INSERT OR REPLACE INTO ssh_wanted VALUES (?, ?, ?)",
-                   (name, int(enabled), json.dumps(keys) if keys is not None else None))
+        r = db.execute("SELECT shell FROM ssh_wanted WHERE peer = ?", (name,)).fetchone()
+    return None if not r or r["shell"] is None else bool(r["shell"])
+
+
+def save_ssh_wanted(name, enabled, keys, shell="keep"):
+    shell = shell_wanted(name) if shell == "keep" else shell
+    with lock:
+        db.execute("INSERT OR REPLACE INTO ssh_wanted (peer, enabled, keys, shell) VALUES (?, ?, ?, ?)",
+                   (name, int(enabled), json.dumps(keys) if keys is not None else None,
+                    None if shell is None else int(shell)))
         db.commit()
 
 
@@ -238,7 +254,7 @@ def push(peer, kind, detail, source):
     except (FileNotFoundError, ValueError):
         return
     # A new SSH key is a way in, so it alerts even when added from the app.
-    security = kind in ("new_ip", "ssh_key_added")
+    security = kind in ("new_ip", "ssh_key_added") or (kind == "ssh_shell" and detail.endswith("on"))
     # Same rules as the app: skip changes you made yourself and your own phone's comings and goings.
     if not security and (source == "app" or peer in cfg.get("quiet_peers", [])):
         return
@@ -251,12 +267,13 @@ def push(peer, kind, detail, source):
         "ssh_key_added": f"{peer}: SSH key added",
         "ssh_key_removed": f"{peer}: SSH key removed",
         "ssh": f"{peer}: SSH server changed",
+        "ssh_shell": f"{peer}: terminal access changed",
         "new_ip": f"{peer} connected from a new address",
         "enabled": f"{peer} turned on{by}",
         "disabled": f"{peer} turned off{by}",
     }.get(kind, f"{peer}: {kind}")
-    body = detail + (". If this wasn't you, turn the device off in WG Switch." if kind == "new_ip" else
-                     ". If this wasn't you, remove the key in WG Switch." if kind == "ssh_key_added" else "")
+    body = detail + (". If this wasn't you, turn the device off in VPN Switch." if kind == "new_ip" else
+                     ". If this wasn't you, remove the key in VPN Switch." if kind == "ssh_key_added" else "")
     req = urllib.request.Request(cfg["url"], data=(body or title).encode(), headers={
         "Title": title,
         "Priority": "high" if security else "default",
@@ -296,12 +313,70 @@ def fmt_duration(seconds):
 
 # ---------------------------------------------------------------- monitor
 
+speeds = {}  # name -> {"up": bytes/s, "down": bytes/s, "session_up", "session_down"}; from the device's side
+monitor = None
+
+
+def local_zone(tz):
+    try:
+        return ZoneInfo(tz) if tz else ZoneInfo("UTC")
+    except Exception:
+        return ZoneInfo("UTC")
+
+
+def usage_since(name, since):
+    with lock:
+        r = db.execute("SELECT COALESCE(SUM(up), 0), COALESCE(SUM(down), 0) FROM usage WHERE peer = ? AND hour >= ?",
+                       (name, int(since))).fetchone()
+    return {"up": r[0], "down": r[1]}
+
+
+def day_starts(tz, days):
+    """Local midnights (unix time) for the last `days` days, oldest first, plus tomorrow's."""
+    z = local_zone(tz)
+    today = datetime.now(z).replace(hour=0, minute=0, second=0, microsecond=0)
+    return [(today - timedelta(days=d)).timestamp() for d in range(days - 1, -1, -1)] + [(today + timedelta(days=1)).timestamp()]
+
+
+def traffic_summary(name, tz):
+    sp = speeds.get(name, {})
+    today = usage_since(name, day_starts(tz, 1)[0])
+    return {"down_rate": round(sp.get("down", 0)), "up_rate": round(sp.get("up", 0)),
+            "today_down": today["down"], "today_up": today["up"]}
+
+
+def traffic_detail(name, tz):
+    z = local_zone(tz)
+    starts = day_starts(tz, 14)
+    with lock:
+        rows = db.execute("SELECT hour, up, down FROM usage WHERE peer = ? AND hour >= ?", (name, int(starts[0]))).fetchall()
+    days = []
+    for a, b in zip(starts, starts[1:]):
+        up = sum(r["up"] for r in rows if a <= r["hour"] < b)
+        down = sum(r["down"] for r in rows if a <= r["hour"] < b)
+        days.append({"date": datetime.fromtimestamp(a, z).strftime("%Y-%m-%d"), "up": up, "down": down})
+    month_start = datetime.now(z).replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
+    sp = speeds.get(name, {})
+    since = monitor.online_since.get(name) if monitor else None
+    return {
+        "down_rate": round(sp.get("down", 0)), "up_rate": round(sp.get("up", 0)),
+        "session": {"seconds": int(time.time() - since), "down": sp.get("session_down", 0), "up": sp.get("session_up", 0)}
+                   if since else None,
+        "today": usage_since(name, starts[-2]),
+        "week": usage_since(name, starts[-8]),
+        "month": usage_since(name, month_start),
+        "days": days,
+    }
+
+
 class Monitor:
     """Turns WireGuard traffic and handshakes into connected/disconnected/reconnected/new_ip events."""
 
     def __init__(self):
         self.online_since = {}  # name -> unix time the current session started
         self.seen = {}  # name -> {rx, rx_at, hs, ep}: last observed counters
+        self.counters = {}  # name -> (rx, tx, time) for traffic measurement
+        self.session_of = {}  # name -> online_since value the session totals belong to
         self.last_fired = {}  # schedule id -> "YYYY-MM-DD HH:MM" already run
         self.last_cleanup = 0
         self.last_domains = 0
@@ -321,7 +396,7 @@ class Monitor:
                     log_event(name, "disconnected", f"turned off, online for {fmt_duration(max(0, now - started))}",
                               source="app")
                 continue
-            hs, ip, endpoint, rx = live[p["pub"]]
+            hs, ip, endpoint, rx = live[p["pub"]][:4]
             s = self.seen.get(name)
             if s is None:
                 # First sight: a recent handshake means it is online right now.
@@ -352,6 +427,43 @@ class Monitor:
                 self.check_ip(name, ip, seed)
                 if online:
                     self.remember_ip(name, ip, s, now)
+
+    def measure(self):
+        """Live speed and hourly totals from WireGuard's byte counters (server rx = device upload)."""
+        now = time.time()
+        live = dump()
+        hour = int(now // 3600) * 3600
+        rows = []
+        for name, p in load_peers().items():
+            if p["pub"] not in live:
+                self.counters.pop(name, None)
+                speeds.pop(name, None)
+                continue
+            rx, tx = live[p["pub"]][3], live[p["pub"]][4]
+            prev = self.counters.get(name)
+            self.counters[name] = (rx, tx, now)
+            if not prev:
+                continue
+            # Counters restart from zero when a device is turned back on or wg0 restarts.
+            up = rx - prev[0] if rx >= prev[0] else rx
+            down = tx - prev[1] if tx >= prev[1] else tx
+            sp = speeds.setdefault(name, {})
+            dt = max(0.001, now - prev[2])
+            sp["up"], sp["down"] = up / dt, down / dt
+            since = self.online_since.get(name)
+            if self.session_of.get(name) != since:
+                self.session_of[name] = since
+                sp["session_up"] = sp["session_down"] = 0
+            if since:
+                sp["session_up"] = sp.get("session_up", 0) + up
+                sp["session_down"] = sp.get("session_down", 0) + down
+            if up or down:
+                rows.append((name, hour, up, down))
+        if rows:
+            with lock:
+                db.executemany("INSERT INTO usage VALUES (?, ?, ?, ?) ON CONFLICT (peer, hour) "
+                               "DO UPDATE SET up = up + excluded.up, down = down + excluded.down", rows)
+                db.commit()
 
     def remember_ip(self, name, ip, s, now):
         """Keep each device's latest public address so it can be shown after it goes offline."""
@@ -409,12 +521,13 @@ class Monitor:
         self.last_cleanup = time.time()
         with lock:
             db.execute("DELETE FROM events WHERE ts < ?", (time.time() - RETENTION_DAYS * 86400,))
+            db.execute("DELETE FROM usage WHERE hour < ?", (time.time() - RETENTION_DAYS * 86400,))
             db.commit()
 
     def loop(self):
         while True:
             time.sleep(TICK)
-            for step in (self.run_timers, self.run_schedules, self.observe, self.refresh_dns, self.cleanup):
+            for step in (self.run_timers, self.run_schedules, self.observe, self.measure, self.refresh_dns, self.cleanup):
                 try:
                     step()
                 except Exception as e:  # keep monitoring even if one step hiccups
@@ -468,13 +581,20 @@ class Handler(BaseHTTPRequestHandler):
                 r = db.execute("SELECT mode FROM rdp_mode WHERE peer = ?", (name,)).fetchone()
             enabled, keys = ssh_wanted(name)
             return self._send(200, {"name": name, "rdp_mode": r["mode"] if r else "direct",
-                                    "ssh_enabled": enabled, "keys": keys})
+                                    "ssh_enabled": enabled, "keys": keys, "shell_enabled": shell_wanted(name)})
         if not self._authorized():
             return
+        q = {k: v[0] for k, v in parse_qs(url.query).items()}
         if url.path == "/peers":
-            return self._send(200, self.list_peers())
+            return self._send(200, self.list_peers(q.get("tz")))
+        m = re.fullmatch(r"/peers/([^/]+)/traffic", url.path)
+        if m:
+            if m[1] not in load_peers():
+                return self._send(404, {"error": "not found"})
+            return self._send(200, traffic_detail(m[1], q.get("tz")))
+        if url.path == "/connections":
+            return self._send(200, self.connections())
         if url.path == "/events":
-            q = {k: v[0] for k, v in parse_qs(url.query).items()}
             sql, args = "SELECT * FROM events WHERE id > ?", [int(q.get("since", 0))]
             if q.get("peer"):
                 sql += " AND peer = ?"
@@ -491,7 +611,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, rows)
         self._send(404, {"error": "not found"})
 
-    def list_peers(self):
+    def connections(self):
+        now = time.time()
+        online = monitor.online_since if monitor else {}
+        out = []
+        for name, p in load_peers().items():
+            sp = speeds.get(name, {})
+            out.append({
+                "name": name, "ip": p["ip"], "domain": domains.get(name), "online": name in online,
+                "self": self._is_requester(p),
+                "since_seconds": int(now - online[name]) if name in online else None,
+                "down_rate": round(sp.get("down", 0)), "up_rate": round(sp.get("up", 0)),
+                "session_down": sp.get("session_down", 0), "session_up": sp.get("session_up", 0),
+            })
+        return {"devices": out}
+
+    def list_peers(self, tz=None):
         disabled, live, now = load_disabled(), dump(), time.time()
         with lock:
             timers = {r["peer"]: r for r in db.execute("SELECT * FROM timers")}
@@ -520,6 +655,7 @@ class Handler(BaseHTTPRequestHandler):
                 "domain": domains.get(name),
                 # only for PCs running the helper; "applied" is what the PC reports it actually did
                 "agent": self.agent_view(name, modes, agents[name], now) if name in agents else None,
+                "traffic": traffic_summary(name, tz),
             })
         return out
 
@@ -538,6 +674,8 @@ class Handler(BaseHTTPRequestHandler):
             # each key with whether the PC has actually applied it yet
             "keys": [dict(describe_key(k), applied=k in reported) for k in keys],
             "keys_pending": sorted(set(keys) ^ set(reported)) != [],
+            "shell_enabled": shell_wanted(name),
+            "shell_applied": None if a["shell"] is None else bool(a["shell"]),
         }
 
     def do_POST(self):
@@ -554,6 +692,9 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/peers/([^/]+)/ssh", self.path)
         if m:
             return self.set_ssh(m[1], body.get("enabled"))
+        m = re.fullmatch(r"/peers/([^/]+)/shell", self.path)
+        if m:
+            return self.set_shell(m[1], body.get("enabled"))
         m = re.fullmatch(r"/peers/([^/]+)/keys", self.path)
         if m:
             return self.add_key(m[1], body.get("name"), body.get("key"))
@@ -586,14 +727,18 @@ class Handler(BaseHTTPRequestHandler):
             reported = None
         with lock:
             prev = db.execute("SELECT applied FROM agent_status WHERE peer = ?", (name,)).fetchone()
-            db.execute("INSERT OR REPLACE INTO agent_status (peer, applied, sshd, error, ts, keys) VALUES (?, ?, ?, ?, ?, ?)",
+            shell = b.get("shell") if isinstance(b.get("shell"), bool) else None
+            db.execute("INSERT OR REPLACE INTO agent_status (peer, applied, sshd, error, ts, keys, shell) VALUES (?, ?, ?, ?, ?, ?, ?)",
                        (name, str(b.get("applied", "")), int(bool(b.get("sshd"))), str(b.get("error") or ""), time.time(),
-                        json.dumps(reported) if reported is not None else None))
+                        json.dumps(reported) if reported is not None else None, None if shell is None else int(shell)))
             db.commit()
         enabled, wanted = ssh_wanted(name)
         if wanted is None and reported is not None:
             # First report from a helper that manages keys: adopt the PC's current keys as the list.
             save_ssh_wanted(name, enabled, [k for k in reported if parse_key(k, k.split()[-1])])
+            enabled, wanted = ssh_wanted(name)
+        if shell is not None and shell_wanted(name) is None and wanted is not None:
+            save_ssh_wanted(name, enabled, wanted, shell)  # likewise adopt the PC's terminal setting
         if prev and prev["applied"] != b.get("applied"):
             label = "tunnel only" if b.get("applied") == "tunnel" else "direct"
             log_event(name, "rdp_mode", f"Remote Desktop access is now {label}", source="agent")
@@ -627,6 +772,16 @@ class Handler(BaseHTTPRequestHandler):
         save_ssh_wanted(name, enabled, keys)
         log_event(name, "ssh", f"SSH server turned {'on' if enabled else 'off'}", source="app")
         self._send(200, {"name": name, "ssh_enabled": enabled})
+
+    def set_shell(self, name, enabled):
+        if name not in load_peers() or not isinstance(enabled, bool):
+            return self._send(400, {"error": "need a known device and enabled true/false"})
+        enabled_ssh, keys = ssh_wanted(name)
+        if keys is None:
+            return self._send(409, {"error": "the PC's helper hasn't reported yet; try again in a minute"})
+        save_ssh_wanted(name, enabled_ssh, keys, enabled)
+        log_event(name, "ssh_shell", f"terminal access turned {'on' if enabled else 'off'}", source="app")
+        self._send(200, {"name": name, "shell_enabled": enabled})
 
     def add_key(self, name, key_name, key):
         if name not in load_peers():
@@ -691,5 +846,6 @@ if __name__ == "__main__":
     db = open_db()
     apply_state()
     refresh_domains()
-    threading.Thread(target=Monitor().loop, daemon=True).start()
+    monitor = Monitor()
+    threading.Thread(target=monitor.loop, daemon=True).start()
     ThreadingHTTPServer(LISTEN, Handler).serve_forever()
