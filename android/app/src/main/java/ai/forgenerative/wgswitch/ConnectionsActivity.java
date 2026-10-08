@@ -147,8 +147,42 @@ public class ConnectionsActivity extends Activity {
                 + "\n→ " + Api.bytes(l.optDouble("sent")) + "   ← " + Api.bytes(l.optDouble("received"));
         if (out + back >= Api.BUSY_BYTES_PER_SEC) detail += "  ·  now → " + Api.rate(out) + "  ← " + Api.rate(back);
         ((TextView) row.findViewById(R.id.days)).setText(detail);
-        row.findViewById(R.id.delete).setVisibility(View.GONE);  // nothing to delete; this is a live view
+        JSONObject end = l.optJSONObject("end");
+        View endButton = row.findViewById(R.id.delete);
+        if (end == null) {
+            endButton.setVisibility(View.GONE);  // neither PC runs the helper, so it can't be ended from here
+        } else {
+            endButton.setContentDescription("End this Remote Desktop connection");
+            endButton.setOnClickListener(v -> confirmEnd(l, end));
+        }
         return row;
+    }
+
+    private void confirmEnd(JSONObject l, JSONObject end) {
+        boolean disconnect = "disconnect".equals(end.optString("action"));
+        String pc = end.optString("pc");
+        String how = disconnect
+                ? "The session on " + pc + " is disconnected. Programs there keep running and you can reconnect later."
+                : "The Remote Desktop window on " + pc + " is closed. The session on " + l.optString("to")
+                  + " stays signed in, just disconnected.";
+        new android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("End " + l.optString("from") + " → " + l.optString("to") + "?")
+                .setMessage(how)
+                .setPositiveButton("End", (dlg, w) -> io.execute(() -> {
+                    String msg;
+                    try {
+                        JSONObject body = new JSONObject(end.toString());
+                        body.remove("pc");
+                        Api.call(this, "POST", "/peers/" + pc + "/rdp/end", body);
+                        msg = "Ending… takes up to 10 seconds";
+                    } catch (Exception e) {
+                        msg = e.getMessage() != null ? e.getMessage() : "Request failed";
+                    }
+                    String m = msg;
+                    runOnUiThread(() -> android.widget.Toast.makeText(this, m, android.widget.Toast.LENGTH_LONG).show());
+                }))
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private View card(JSONObject dev) {

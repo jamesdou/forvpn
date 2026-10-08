@@ -146,6 +146,9 @@ public class DeviceActivity extends Activity {
                 content.addView(rdpModeRow(agent));
                 content.addView(note(rdpStatus(agent)));
 
+                JSONObject rdp = agent.optJSONObject("rdp");
+                if (rdp != null) rdpSessions(rdp);
+
                 content.addView(section("SSH server"));
                 content.addView(sshRow(agent));
                 content.addView(section("Terminal access"));
@@ -327,6 +330,55 @@ public class DeviceActivity extends Activity {
             if (i > 0) lp.leftMargin = dp(8);
             row.addView(chip, lp);
         }
+        return row;
+    }
+
+    /** Live Remote Desktop sessions on this PC, each with a button to end it. */
+    private void rdpSessions(JSONObject rdp) {
+        JSONArray in = rdp.optJSONArray("inbound"), out = rdp.optJSONArray("outbound");
+        int count = (in == null ? 0 : in.length()) + (out == null ? 0 : out.length());
+        content.addView(section("Remote Desktop sessions"));
+        if (count == 0) {
+            content.addView(note("None right now."));
+            return;
+        }
+        for (int i = 0; in != null && i < in.length(); i++) {
+            JSONObject s = in.optJSONObject(i);
+            content.addView(sessionRow("Someone is connected to " + peer,
+                    "as " + s.optString("user") + " · session " + s.optInt("session"),
+                    "Disconnect", "Programs keep running on " + peer + "; you can reconnect later.",
+                    "disconnect", "session", s.optInt("session")));
+        }
+        for (int i = 0; out != null && i < out.length(); i++) {
+            JSONObject w = out.optJSONObject(i);
+            content.addView(sessionRow(peer + " is connected to " + w.optString("to"),
+                    "Remote Desktop window (" + w.optString("app") + ")",
+                    "Close", "The window on " + peer + " closes; the other PC's session stays signed in.",
+                    "close", "pid", w.optInt("pid")));
+        }
+    }
+
+    private View sessionRow(String title, String detail, String verb, String explain, String action, String key, int value) {
+        View row = LayoutInflater.from(this).inflate(R.layout.item_schedule, content, false);
+        ((android.widget.ImageView) row.findViewById(R.id.icon)).setImageResource(R.drawable.ic_desktop);
+        ((TextView) row.findViewById(R.id.title)).setText(title);
+        ((TextView) row.findViewById(R.id.days)).setText(detail);
+        View end = row.findViewById(R.id.delete);
+        end.setContentDescription(verb + " this Remote Desktop session");
+        end.setOnClickListener(v -> new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(verb + "?")
+                .setMessage(explain)
+                .setPositiveButton(verb, (dlg, w) -> {
+                    JSONObject body = new JSONObject();
+                    try {
+                        body.put("action", action);
+                        body.put(key, value);
+                    } catch (Exception ignored) {
+                    }
+                    post("/peers/" + peer + "/rdp/end", body, "Ending… takes up to 10 seconds");
+                })
+                .setNegativeButton("Cancel", null)
+                .show());
         return row;
     }
 

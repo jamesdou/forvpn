@@ -4,6 +4,7 @@
 #     tunnel - one block rule for inbound port 3389 from the network. Connections through the
 #              SSH tunnel arrive on loopback, which Windows Firewall does not filter, so they still work.
 #   SSH server on/off, which device keys may use SSH, and terminal access (your account, key + password).
+#   Reports this PC's Remote Desktop sessions and ends one when the app asks.
 # Installed by install-rdp-agent.ps1 as a scheduled task running as SYSTEM.
 $ErrorActionPreference = "Stop"
 $api = "http://10.100.0.1:8080"  # reachable only through the WireGuard tunnel
@@ -81,6 +82,40 @@ function Set-Shell($on) {
     if (Test-Sshd) { Restart-Service sshd }
 }
 
+# Remote Desktop sessions into this PC (from qwinsta), and this PC's own Remote Desktop
+# windows connected out to other VPN devices.
+function Get-RdpInfo {
+    $inbound = @()
+    foreach ($line in (qwinsta 2>$null | Select-Object -Skip 1)) {
+        # e.g. ">rdp-tcp#3   james   2  Active"
+        if ($line -match '^\s*>?(rdp-tcp#\d+)\s+(\S+)\s+(\d+)\s+Active') {
+            $inbound += @{ session = [int]$Matches[3]; user = $Matches[2]; name = $Matches[1] }
+        }
+    }
+    $outbound = @()
+    foreach ($c in (Get-NetTCPConnection -RemotePort 3389 -State Established -ErrorAction SilentlyContinue)) {
+        if ($c.RemoteAddress -notlike "10.100.0.*") { continue }
+        $proc = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
+        if ($proc -and $proc.ProcessName -in "mstsc", "msrdc") {
+            $outbound += @{ pid = [int]$c.OwningProcess; to = $c.RemoteAddress; app = $proc.ProcessName }
+        }
+    }
+    return @{ inbound = @($inbound); outbound = @($outbound) }
+}
+
+function Invoke-AgentCommand($cmd) {
+    if ($cmd.action -eq "disconnect") {
+        # Disconnect, not log off: programs in that session keep running.
+        $id = [int]$cmd.session
+        if (-not ((Get-RdpInfo).inbound | Where-Object { $_.session -eq $id })) { return }
+        tsdiscon $id 2>$null | Out-Null
+    } elseif ($cmd.action -eq "close") {
+        # Only ever close a Remote Desktop window, whatever pid the server sent.
+        $proc = Get-Process -Id ([int]$cmd.pid) -ErrorAction SilentlyContinue
+        if ($proc -and $proc.ProcessName -in "mstsc", "msrdc") { Stop-Process -Id $proc.Id -Force }
+    }
+}
+
 function Set-Ssh($on) {
     $s = Get-Service sshd -ErrorAction SilentlyContinue
     if (-not $s) { throw "OpenSSH Server is not installed" }
@@ -95,12 +130,18 @@ function Set-Ssh($on) {
 
 while ($true) {
     $err = ""
+    $done = @()
     try {
         # If the server can't be reached nothing changes: everything stays as it is.
         $cfg = Invoke-RestMethod "$api/agent" -TimeoutSec 5
         $want = $cfg.rdp_mode
         if ($null -ne $cfg.keys) { Sync-Keys @($cfg.keys) }  # null = server hasn't learned our keys yet
         if ($null -ne $cfg.shell_enabled) { Set-Shell ([bool]$cfg.shell_enabled) }
+        foreach ($cmd in @($cfg.commands)) {
+            if ($null -eq $cmd) { continue }
+            try { Invoke-AgentCommand $cmd } catch { }
+            $done += [int]$cmd.id  # acknowledged either way, so a bad command isn't retried forever
+        }
         # Tunnel only always needs SSH, whatever the on/off setting says.
         Set-Ssh ($want -eq "tunnel" -or $cfg.ssh_enabled -ne $false)
         if ($want -eq "tunnel") {
@@ -118,7 +159,8 @@ while ($true) {
         $err = $_.Exception.Message
     }
     try {
-        $body = @{ applied = (Get-Applied); sshd = (Test-Sshd); error = $err; keys = @(Get-Keys); shell = (Test-Shell) } | ConvertTo-Json -Compress
+        $body = @{ applied = (Get-Applied); sshd = (Test-Sshd); error = $err; keys = @(Get-Keys); shell = (Test-Shell)
+                   rdp = (Get-RdpInfo); done = @($done) } | ConvertTo-Json -Compress -Depth 4
         Invoke-RestMethod "$api/agent/status" -Method Post -Body $body -ContentType "application/json" -TimeoutSec 5 | Out-Null
     } catch {
         # Server unreachable; report again next round.

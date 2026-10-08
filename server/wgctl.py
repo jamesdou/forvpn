@@ -21,11 +21,12 @@ timers ("on for 2 hours") and daily schedules ("off at 01:00").
   POST   /peers/<name>/shell        body {"enabled": bool}: terminal access (device key + Windows password)
   POST   /peers/<name>/keys         body {"name", "key"}: allow a device's SSH public key
   DELETE /peers/<name>/keys/<name>
+  POST   /peers/<name>/rdp/end      body {"action": "disconnect", "session"} | {"action": "close", "pid"}
 
 Device helper (rdp-agent.ps1), identified by its VPN address instead of the token -
 WireGuard guarantees a packet from 10.100.0.x came from that device's key:
   GET    /agent                     -> {"rdp_mode", "ssh_enabled", "keys", "shell_enabled"} for the calling device
-  POST   /agent/status              body {"applied", "sshd", "error", "keys", "shell"}
+  POST   /agent/status              body {"applied", "sshd", "error", "keys", "shell", "rdp", "done"}
 
 Every request needs header "Authorization: Bearer <token>" (token in TOKEN_FILE).
 """
@@ -162,6 +163,8 @@ def open_db():
             peer TEXT PRIMARY KEY, applied TEXT, sshd INTEGER, error TEXT, ts REAL);
         CREATE TABLE IF NOT EXISTS ssh_wanted (
             peer TEXT PRIMARY KEY, enabled INTEGER, keys TEXT);
+        CREATE TABLE IF NOT EXISTS agent_commands (
+            id INTEGER PRIMARY KEY, peer TEXT, body TEXT, created REAL, done INTEGER DEFAULT 0);
         CREATE TABLE IF NOT EXISTS last_ip (
             peer TEXT PRIMARY KEY, ip TEXT, ts REAL);
         CREATE TABLE IF NOT EXISTS usage (
@@ -170,7 +173,7 @@ def open_db():
             id INTEGER PRIMARY KEY, peer TEXT, action TEXT, time TEXT, days TEXT, tz TEXT);
     """)
     for table, column in (("agent_status", "keys TEXT"), ("agent_status", "shell INTEGER"),
-                          ("ssh_wanted", "shell INTEGER")):  # columns added after the first release
+                          ("ssh_wanted", "shell INTEGER"), ("agent_status", "rdp TEXT")):  # columns added after the first release
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
         except sqlite3.OperationalError:
@@ -247,6 +250,21 @@ def save_ssh_wanted(name, enabled, keys, shell="keep"):
         db.commit()
 
 
+COMMAND_TTL = 300  # an end request the PC doesn't pick up within 5 min is dropped
+
+
+def agent_rdp(name):
+    """The PC's last reported Remote Desktop sessions: {"inbound": [...], "outbound": [...]}, or None."""
+    with lock:
+        r = db.execute("SELECT rdp, ts FROM agent_status WHERE peer = ?", (name,)).fetchone()
+    if not r or not r["rdp"] or time.time() - r["ts"] > 60:
+        return None  # stale: the helper hasn't checked in for a minute
+    try:
+        return json.loads(r["rdp"])
+    except ValueError:
+        return None
+
+
 def push(peer, kind, detail, source):
     """Instant phone notification via ntfy, if NTFY_FILE configures a topic."""
     try:
@@ -268,6 +286,7 @@ def push(peer, kind, detail, source):
         "ssh_key_removed": f"{peer}: SSH key removed",
         "ssh": f"{peer}: SSH server changed",
         "ssh_shell": f"{peer}: terminal access changed",
+        "rdp_end": f"{peer}: Remote Desktop session ended",
         "new_ip": f"{peer} connected from a new address",
         "enabled": f"{peer} turned on{by}",
         "disabled": f"{peer} turned off{by}",
@@ -655,8 +674,13 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 r = db.execute("SELECT mode FROM rdp_mode WHERE peer = ?", (name,)).fetchone()
             enabled, keys = ssh_wanted(name)
+            with lock:
+                cmds = [dict(json.loads(c["body"]), id=c["id"]) for c in db.execute(
+                    "SELECT * FROM agent_commands WHERE peer = ? AND done = 0 AND created > ?",
+                    (name, time.time() - COMMAND_TTL))]
             return self._send(200, {"name": name, "rdp_mode": r["mode"] if r else "direct",
-                                    "ssh_enabled": enabled, "keys": keys, "shell_enabled": shell_wanted(name)})
+                                    "ssh_enabled": enabled, "keys": keys, "shell_enabled": shell_wanted(name),
+                                    "commands": cmds})
         if not self._authorized():
             return
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
@@ -699,7 +723,20 @@ class Handler(BaseHTTPRequestHandler):
                 "down_rate": round(sp.get("down", 0)), "up_rate": round(sp.get("up", 0)),
                 "session_down": sp.get("session_down", 0), "session_up": sp.get("session_up", 0),
             })
-        return {"devices": out, "links": device_links()}
+        links = device_links()
+        ips = {n: p["ip"].split("/")[0] for n, p in load_peers().items()}
+        for l in links:
+            if l["port"] != 3389:
+                continue
+            into, out_of = agent_rdp(l["to"]), agent_rdp(l["from"])
+            # Prefer disconnecting at the PC being controlled; otherwise close the window on the PC doing it.
+            if into and into.get("inbound"):
+                l["end"] = {"pc": l["to"], "action": "disconnect", "session": into["inbound"][0]["session"]}
+            elif out_of:
+                win = next((w for w in out_of.get("outbound", []) if w.get("to") == ips.get(l["to"])), None)
+                if win:
+                    l["end"] = {"pc": l["from"], "action": "close", "pid": win["pid"]}
+        return {"devices": out, "links": links}
 
     def list_peers(self, tz=None):
         disabled, live, now = load_disabled(), dump(), time.time()
@@ -751,6 +788,7 @@ class Handler(BaseHTTPRequestHandler):
             "keys_pending": sorted(set(keys) ^ set(reported)) != [],
             "shell_enabled": shell_wanted(name),
             "shell_applied": None if a["shell"] is None else bool(a["shell"]),
+            "rdp": agent_rdp(name),
         }
 
     def do_POST(self):
@@ -770,6 +808,9 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/peers/([^/]+)/shell", self.path)
         if m:
             return self.set_shell(m[1], body.get("enabled"))
+        m = re.fullmatch(r"/peers/([^/]+)/rdp/end", self.path)
+        if m:
+            return self.end_rdp(m[1], body)
         m = re.fullmatch(r"/peers/([^/]+)/keys", self.path)
         if m:
             return self.add_key(m[1], body.get("name"), body.get("key"))
@@ -803,9 +844,16 @@ class Handler(BaseHTTPRequestHandler):
         with lock:
             prev = db.execute("SELECT applied FROM agent_status WHERE peer = ?", (name,)).fetchone()
             shell = b.get("shell") if isinstance(b.get("shell"), bool) else None
-            db.execute("INSERT OR REPLACE INTO agent_status (peer, applied, sshd, error, ts, keys, shell) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rdp = b.get("rdp") if isinstance(b.get("rdp"), dict) else None
+            db.execute("INSERT OR REPLACE INTO agent_status (peer, applied, sshd, error, ts, keys, shell, rdp) "
+                       "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                        (name, str(b.get("applied", "")), int(bool(b.get("sshd"))), str(b.get("error") or ""), time.time(),
-                        json.dumps(reported) if reported is not None else None, None if shell is None else int(shell)))
+                        json.dumps(reported) if reported is not None else None, None if shell is None else int(shell),
+                        json.dumps(rdp) if rdp is not None else None))
+            done = [i for i in (b.get("done") or []) if isinstance(i, int)] if isinstance(b.get("done"), list) else []
+            if done:
+                db.executemany("UPDATE agent_commands SET done = 1 WHERE peer = ? AND id = ?", [(name, i) for i in done])
+            db.execute("DELETE FROM agent_commands WHERE created < ?", (time.time() - 86400,))
             db.commit()
         enabled, wanted = ssh_wanted(name)
         if wanted is None and reported is not None:
@@ -847,6 +895,26 @@ class Handler(BaseHTTPRequestHandler):
         save_ssh_wanted(name, enabled, keys)
         log_event(name, "ssh", f"SSH server turned {'on' if enabled else 'off'}", source="app")
         self._send(200, {"name": name, "ssh_enabled": enabled})
+
+    def end_rdp(self, name, b):
+        """Ask a PC's helper to disconnect an incoming session or close one of its Remote Desktop windows.
+        Only sessions/windows the PC itself reported are accepted."""
+        rdp = agent_rdp(name)
+        if name not in load_peers() or rdp is None:
+            return self._send(409, {"error": f"{name}'s helper isn't reporting right now"})
+        action = b.get("action")
+        if action == "disconnect" and any(x.get("session") == b.get("session") for x in rdp.get("inbound", [])):
+            cmd, what = {"action": "disconnect", "session": b["session"]}, "incoming Remote Desktop session"
+        elif action == "close" and any(x.get("pid") == b.get("pid") for x in rdp.get("outbound", [])):
+            cmd, what = {"action": "close", "pid": b["pid"]}, "outgoing Remote Desktop window"
+        else:
+            return self._send(404, {"error": "that session isn't active any more"})
+        with lock:
+            db.execute("INSERT INTO agent_commands (peer, body, created) VALUES (?, ?, ?)",
+                       (name, json.dumps(cmd), time.time()))
+            db.commit()
+        log_event(name, "rdp_end", f"ended {what} from the app", source="app")
+        self._send(200, {"queued": cmd})
 
     def set_shell(self, name, enabled):
         if name not in load_peers() or not isinstance(enabled, bool):
