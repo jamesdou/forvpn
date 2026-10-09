@@ -60,7 +60,14 @@ class NetworkMapView extends View {
     }
 
     void setDevices(JSONArray devices, JSONArray links) {
-        this.devices = devices;
+        JSONArray ordered = new JSONArray();
+        for (int i = 0; i < devices.length(); i++) {
+            if ("homepc".equals(devices.optJSONObject(i).optString("name"))) ordered.put(devices.optJSONObject(i));
+        }
+        for (int i = 0; i < devices.length(); i++) {
+            if (!"homepc".equals(devices.optJSONObject(i).optString("name"))) ordered.put(devices.optJSONObject(i));
+        }
+        this.devices = ordered;
         this.links = links == null ? new JSONArray() : links;
         StringBuilder desc = new StringBuilder("Network map. ");
         for (int i = 0; i < devices.length(); i++) {
@@ -79,7 +86,9 @@ class NetworkMapView extends View {
     @Override
     protected void onDraw(Canvas c) {
         float cx = getWidth() / 2f, cy = getHeight() / 2f;
-        float radius = Math.min(cx, cy) - 40 * d;
+        // Names sit outside each node, so keep space beyond the ring: above/below for the
+        // top and bottom nodes, and beside the ring for the left/right ones.
+        float radius = Math.min(cx - 84 * d, cy - 48 * d);
         int n = devices.length();
         long now = SystemClock.uptimeMillis();
         boolean animating = false;
@@ -160,9 +169,17 @@ class NetworkMapView extends View {
             node.setColor(on ? online : offline);
             c.drawCircle(x, y, 5 * d, node);
             label.setColor(on ? textColor : muted);
-            float ly = y + nr + 16 * d;
-            if (ly > getHeight() - 4 * d) ly = y - nr - 8 * d;
-            c.drawText(dev.optString("name"), x, ly, label);
+            float ox = (float) Math.cos(angle), oy = (float) Math.sin(angle);
+            float lx = x + ox * (nr + 10 * d), ly = y + oy * (nr + 10 * d);
+            if (Math.abs(ox) < 0.35f) {  // top or bottom: centred above / below
+                label.setTextAlign(Paint.Align.CENTER);
+                ly += oy < 0 ? -2 * d : label.getTextSize() - 2 * d;
+            } else {  // left or right: beside the node, reading away from it
+                label.setTextAlign(ox > 0 ? Paint.Align.LEFT : Paint.Align.RIGHT);
+                ly += label.getTextSize() / 3;
+            }
+            c.drawText(dev.optString("name"), lx, ly, label);
+            label.setTextAlign(Paint.Align.CENTER);
         }
 
         // The VPN server hub.

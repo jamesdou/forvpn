@@ -351,6 +351,15 @@ def ensure_flow_tracking():
 
 
 link_samples = {}  # (src, dst, port) -> (bytes sent, bytes received, time) for live link speed
+flow_activity = {}  # one tracked flow -> (its byte total, when that total last changed)
+LINK_IDLE = 180  # a connection with no traffic for 3 min is gone; live Remote Desktop/SSH always chatter
+
+
+def tcp_established_timeout():
+    try:
+        return int(open("/proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established").read())
+    except (OSError, ValueError):
+        return 432000
 
 
 def device_links():
@@ -361,6 +370,9 @@ def device_links():
         return []
     names = {p["ip"].split("/")[0]: n for n, p in load_peers().items()}
     links = {}
+    now = time.time()
+    established = tcp_established_timeout()
+    seen_flows = set()
     for line in out.splitlines():
         parts = line.split()
         if len(parts) < 3 or parts[0] != "ipv4" or parts[2] not in ("tcp", "udp"):
@@ -378,6 +390,21 @@ def device_links():
         sport, port = int(fields["sport"][0]), int(fields["dport"][0])
         sent = int(fields.get("bytes", ["0"])[0])
         received = int(fields.get("bytes", ["0", "0"])[1]) if len(fields.get("bytes", [])) > 1 else 0
+        # Skip dead connections the kernel still remembers (a TCP connection that was never closed
+        # cleanly stays "ESTABLISHED" for days). Idle time comes from the byte counters changing
+        # between checks; on first sight, from how much of the kernel's idle timeout is used up.
+        flow = (parts[2], src, sport, dst, port)
+        seen_flows.add(flow)
+        total = sent + received
+        prev = flow_activity.get(flow)
+        if prev is None:
+            remaining = int(parts[4]) if parts[4].isdigit() else 0
+            idle = established - remaining if parts[2] == "tcp" and remaining > 300 else 0
+            flow_activity[flow] = (total, now - max(0, idle))
+        elif total != prev[0]:
+            flow_activity[flow] = (total, now)
+        if now - flow_activity[flow][1] > LINK_IDLE:
+            continue
         # Tracking can pick up a connection mid-stream from the server's side's first packet,
         # recording it backwards (e.g. work:3389 -> homepc:61602). The side on a known service
         # port, or the non-temporary port, is the one that was connected to.
@@ -390,7 +417,8 @@ def device_links():
         l["sent"] += sent
         l["received"] += received
         l["seconds"] = max(l["seconds"], age)
-    now = time.time()
+    for flow in [f for f in flow_activity if f not in seen_flows]:
+        del flow_activity[flow]  # the kernel forgot it, so do we
     result = []
     for (a, b, port), l in links.items():
         prev = link_samples.get((a, b, port))
